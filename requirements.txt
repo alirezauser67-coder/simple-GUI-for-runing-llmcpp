@@ -1,0 +1,7 @@
+# llama_runner has NO hard third-party dependencies.
+# The entire app runs on the Python standard library + tkinter
+# (bundled with the official Python Windows installer).
+#
+# Optional (recommended): more accurate CPU/RAM auto-detection.
+# Without it the app falls back to a PowerShell/CIM query.
+psutil
