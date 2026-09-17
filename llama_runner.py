@@ -167,6 +167,95 @@ def get_model_architecture_info(path):
     }
 
 
+# GGUF architectures that take a CLIP/mmproj projector — i.e. models that
+# can actually see images. A base model is a "vision model" only if its
+# general.architecture is one of these AND a matching .mmproj is loaded.
+VISION_ARCHITECTURES = {
+    "llava",       # LLaVA 1.5 / 1.6 / bakllava
+    "qwen2vl",     # Qwen2-VL / Qwen2.5-VL
+    "qwen3v",      # Qwen3-VL (newer llama.cpp)
+    "minicpmv",    # MiniCPM-V
+    "internvl",    # InternVL
+    "moondream",   # Moondream
+    "florence2",   # Florence-2
+}
+
+# Well-known pure-text architectures. Anything here can NEVER see images
+# no matter what mmproj is attached.
+TEXT_ONLY_ARCHS = {
+    "llama", "llama2", "llama3",
+    "qwen2", "qwen2moe", "qwen3", "qwen3moe", "qwq",
+    "mistral", "mixtral",
+    "gemma", "gemma2", "gemma3",
+    "phi2", "phi3", "gpt2", "falcon", "baichuan", "mpt",
+    "starcoder", "deepseek2", "deepseek3", "olmo", "granite",
+    "arctic", "dbrx", "gptneox", "persimmon", "llava_quant",
+}
+
+
+def detect_mmproj(model_path):
+    """Find the best multimodal projector living beside the model.
+
+    Projectors ship in a few shapes: '*.mmproj' files, GGUF files named
+    'mmproj-<model>-f16.gguf', or occasionally 'clip-<model>.gguf'. We
+    recognize all of them and pick the candidate whose name best matches
+    the model's own name (substring first, then shared-name-token ratio),
+    so a folder holding several projectors still gets the right one.
+    Returns an absolute path, or None."""
+    d = os.path.dirname(os.path.abspath(model_path))
+    if not os.path.isdir(d):
+        return None
+    try:
+        files = os.listdir(d)
+    except OSError:
+        return None
+    model_basename = os.path.basename(model_path).lower()
+    base = os.path.splitext(model_basename)[0]
+    cands = []
+    for fn in files:
+        fnl = fn.lower()
+        if fnl == model_basename:
+            continue
+        if fnl.endswith(".mmproj") or fnl.startswith(("mmproj", "clip")):
+            cands.append(fn)
+    if not cands:
+        return None
+    cands.sort()
+
+    def norm(name):
+        n = re.sub(r"(?i)(\.(mmproj|gguf|bin))$", "", name)
+        n = re.sub(r"(?i)^(mmproj|clip)[-_]?", "", n)
+        n = re.sub(r"(?i)[-_ ]?(fp16|bf16|f16|f32|q2_?k|q3_?k|q4_?k|q5_?k|q6_?k|q8_?k|q4_?0|q5_?0|q8_?0)\b", "", n)
+        return n.strip("-_ .")
+
+    def toks(s):
+        return set(re.split(r"[^a-z0-9]+", s.lower())) - {""}
+
+    def score(fn):
+        fnl = fn.lower()
+        s = 0.0
+        if base and base in fnl:
+            s += 3.0
+        common = toks(base) & toks(norm(fn))
+        denom = max(len(toks(base)), 1)
+        s += len(common) / denom * 2.0
+        if "clip" in fnl:
+            s += 0.5
+        if re.search(r"(?i)(f16|bf16|fp16)", fn):
+            s += 0.3
+        return s
+
+    best = max(cands, key=score)
+    pn = norm(best).lower()
+    # Only auto-pick a best guess when there's real evidence it belongs to
+    # this model: a shared name substring, shared tokens, or it's the only
+    # projector in the folder.
+    evidence = (base and (base in pn or base in best.lower())) or (toks(base) & toks(pn))
+    if not evidence and len(cands) > 1:
+        return None
+    return os.path.join(d, best)
+
+
 # ---------------------------------------------------------------------------
 # Small helper: hover tooltips so every control can explain itself
 # ---------------------------------------------------------------------------
@@ -1146,6 +1235,82 @@ TR = {
               "mmproj file is set (the two are never sent together).",
         "fa": "آدرس راه‌دور پروجکتور چندرسانه‌ای (-mmu / --mmproj-url). فقط وقتی استفاده می‌شود که فایل "
               "محلی mmproj تنظیم نشده باشد (هر دو هرگز با هم ارسال نمی‌شوند).",
+    },
+    "vision_check_btn": {"en": "🔍 Check Vision", "fa": "🔍 بررسی بینایی"},
+    "vision_check_tip": {
+        "en": "Inspect the selected model: does it support images? Reads the GGUF architecture, "
+              "auto-detects a matching .mmproj next to the model, and clears up why a text-only "
+              "model can't see images.",
+        "fa": "مدل انتخاب‌شده را بررسی می‌کند: آیا تصویر را می‌فهمد؟ معماری GGUF را می‌خواند، فایل .mmproj "
+              "هم‌پوشه را خودکار پیدا می‌کند و مشخص می‌کند چرا مدل متنی نمی‌تواند تصویر ببیند.",
+    },
+    "vision_yes": {"en": "👁 Vision model ({arch})", "fa": "👁 مدل بینایی ({arch})"},
+    "vision_no": {"en": "✗ Text-only model — no vision capability", "fa": "✗ مدل متنی — قابلیت دیدن تصویر ندارد"},
+    "vision_unknown": {"en": "? Couldn't read model metadata", "fa": "؟ خواندن متادیتای مدل ممکن نشد"},
+    "vision_mmproj_auto": {"en": "auto mmproj: {name}", "fa": "mmproj خودکار: {name}"},
+    "vision_no_mmproj": {"en": "no .mmproj in model folder", "fa": "فایل .mmproj در پوشه مدل نیست"},
+    "vision_need_model": {
+        "en": "Select a valid GGUF model in the Server Setup tab first — the vision check reads "
+              "the model's own metadata.",
+        "fa": "ابتدا در تب تنظیمات سرور یک مدل GGUF معتبر انتخاب کنید — بررسی بینایی، متادیتای خود مدل "
+              "را می‌خواند.",
+    },
+    "vision_msg_text_title": {"en": "Not a vision model", "fa": "مدل بینایی نیست"},
+    "vision_msg_text_body": {
+        "en": "This model ({arch}) is text-only — it physically cannot understand images, so no "
+              "mmproj will ever fix it.\n\nVision is a property of the MODEL, not of this app:\n"
+              "• You need a multimodal GGUF model PLUS its matching .mmproj projector file.\n"
+              "• Vision-ready llama.cpp models: Qwen2.5-VL, LLaVA 1.6, MiniCPM-V, InternVL, "
+              "Moondream, Florence-2.\n"
+              "• On Hugging Face search e.g. \"Qwen2.5-VL GGUF\": download the model .gguf AND the "
+              ".mmproj attached to the same page, and put both in one folder.",
+        "fa": "این مدل ({arch}) فقط متنی است — از نظر فنی امکان دیدن تصویر را ندارد، پس هیچ فایل mmproj "
+              "هرگز آن را درست نمی‌کند.\n\nدید تصویری ویژگیِ خودِ مدل است، نه این برنامه:\n"
+              "• به یک مدل GGUF چندرسانه‌ای به‌همراه فایل پروجکتور .mmproj مخصوص آن نیاز دارید.\n"
+              "• مدل‌های آماده‌ی بینایی برای llama.cpp: Qwen2.5-VL، LLaVA 1.6، MiniCPM-V، InternVL، "
+              "Moondream، Florence-2.\n"
+              "• در Hugging Face مثلاً «Qwen2.5-VL GGUF» را جستجو کنید: هم فایل .gguf مدل و هم فایل .mmproj "
+              "همان صفحه را دانلود و هر دو را در یک پوشه بگذارید.",
+    },
+    "vision_msg_vision_title": {"en": "Vision model detected", "fa": "مدل بینایی شناسایی شد"},
+    "vision_msg_vision_ok": {
+        "en": "✓ {arch} supports images.\nAuto-loaded mmproj: {name}\n\nThe server will now understand "
+              "images from any OpenAI-compatible client (/v1/chat/completions with base64 images).",
+        "fa": "✓ معماری {arch} از تصویر پشتیبانی می‌کند.\nmmproj به‌صورت خودکار بارگذاری شد: {name}\n\n"
+              "سرور حالا تصاویر را می‌فهمد (هر کلاینتی سازگار با OpenAI مثل /v1/chat/completions با "
+              "تصویر base64).",
+    },
+    "vision_msg_vision_noproj": {
+        "en": "{arch} is a vision model, but no .mmproj projector was found next to it.\n\n"
+              "Download the matching projector from the same Hugging Face page (it's usually named "
+              "like the model, e.g. \"{stem}.mmproj\" or \"mmproj-f16.gguf\"), place it in the "
+              "model's folder, and press Check Vision again.\n\n"
+              "Without an mmproj, llama-server will start but cannot process images.",
+        "fa": "{arch} یک مدل بینایی است، اما هیچ فایل پروجکتور .mmproj کنار آن پیدا نشد.\n\n"
+              "پروجکتور مخصوص همان مدل را از همان صفحه Hugging Face دانلود کنید (معمولاً همنام مدل است، "
+              "مثلاً «{stem}.mmproj» یا «mmproj-f16.gguf»)، آن را در پوشه مدل بگذارید و دوباره «بررسی "
+              "بینایی» را بزنید.\n\nبدون فایل mmproj سرور شروع می‌شود ولی نمی‌تواند تصویر را پردازش کند.",
+    },
+    "vision_possible": {"en": "~ possibly multimodal ({arch})", "fa": "~ احتمالاً چندرسانه‌ای ({arch})"},
+    "vision_msg_possible_title": {"en": "Looks multimodal", "fa": "به‌نظر چندرسانه‌ای می‌رسد"},
+    "vision_msg_possible_body": {
+        "en": "{arch} isn't on my known-architectures list either way, but a matching projector "
+              "({name}) was found right next to it, which usually means this is a vision model.\n\n"
+              "The mmproj is loaded, so llama-server will use it. If the server logs a CLIP/clip "
+              "error or rejects images, the model is actually text-only.",
+        "fa": "معماری {arch} نه در لیست شناخته‌شده من است و نه به‌عنوان متنی علامت خورده، اما یک پروجکتور "
+              "همنام ({name}) دقیقاً کنار آن پیدا شد که معمولاً یعنی این یک مدل بینایی است.\n\n"
+              "mmproj بارگذاری شده و سرور از آن استفاده می‌کند. اگر سرور خطای CLIP/clip داد یا تصویر را "
+              "رد کرد، یعنی مدل در واقع فقط متنی است.",
+    },
+    "vision_msg_unknown_title": {"en": "Can't tell from metadata", "fa": "از روی متادیتا مشخص نیست"},
+    "vision_msg_unknown_body": {
+        "en": "Couldn't read this model's architecture (arch = \"{arch}\"), so I can't say whether it "
+              "supports vision. Make sure it's a valid GGUF model; if it is a vision model, download "
+              "its .mmproj and place it in the same folder.",
+        "fa": "معماری این مدل خوانده نشد (arch = \"{arch}\")، پس نمی‌توانم بگویم آیا بینایی دارد یا نه. "
+              "مطمئن شوید فایل GGUF معتبر است؛ اگر مدل بینایی است، فایل .mmproj آن را دانلود و در همان "
+              "پوشه بگذارید.",
     },
 
     "reasoning_section": {"en": "🧠 Reasoning / Thinking Mode", "fa": "🧠 حالت استدلال / تفکر"},
@@ -2143,6 +2308,18 @@ class LlamaRunner:
         mmu_tip = Tooltip(mmu_entry, self.t("mmproj_url_tip"))
         self._reg(mmu_tip, "mmproj_url_tip", "tooltip")
 
+        mm_vis_row = ttk.Frame(mm_frame)
+        mm_vis_row.pack(fill=tk.X, pady=(6, 0))
+        self.vision_check_btn = ttk.Button(mm_vis_row, text=self.t("vision_check_btn"),
+                                            command=self._check_vision)
+        self.vision_check_btn.pack(side=tk.LEFT)
+        self._reg(self.vision_check_btn, "vision_check_btn", "button")
+        vis_tip = Tooltip(self.vision_check_btn, self.t("vision_check_tip"))
+        self._reg(vis_tip, "vision_check_tip", "tooltip")
+        self.vision_status_lbl = ttk.Label(mm_vis_row, text="", font=self.en_font(9))
+        self.vision_status_lbl.pack(side=tk.LEFT, padx=10)
+        self._refresh_vision_status()
+
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(4, 2))
 
         extra_frame = ttk.Frame(parent)
@@ -3082,6 +3259,112 @@ class LlamaRunner:
 
     def on_model_changed(self):
         self.update_compatibility()
+        self._vision_auto()
+
+    # ------------------------------------------------------------------
+    # Vision / mmproj helpers
+    # ------------------------------------------------------------------
+    def _auto_detect_mmproj(self, silent=True):
+        """Auto-fill the mmproj field when exactly one projector lives in
+        the model's folder. Returns the chosen path or None. Silent mode
+        only logs when a projector is actually auto-selected."""
+        model = self.model_var.get().strip()
+        if not model or not os.path.exists(model):
+            return None
+        found = detect_mmproj(model)
+        if not found:
+            return None
+        cur = self.mmproj_path_var.get().strip()
+        if cur and os.path.abspath(cur) == os.path.abspath(found):
+            return found
+        self.mmproj_path_var.set(found)
+        self.mmproj_url_var.set("")
+        self.log_write(self.t("vision_mmproj_auto").format(name=os.path.basename(found)), "success")
+        return found
+
+    def _set_vision_status_text(self, arch, status, mmproj):
+        if not hasattr(self, "vision_status_lbl"):
+            return
+        if status == "vision":
+            txt = self.t("vision_yes").format(arch=arch)
+            col = S("ok")
+        elif status == "possible":
+            txt = self.t("vision_possible").format(arch=arch)
+            col = S("info")
+        elif status == "text":
+            txt = self.t("vision_no")
+            col = S("warn")
+        else:
+            txt = self.t("vision_unknown")
+            col = S("info")
+        if mmproj:
+            txt += "  ·  " + self.t("vision_mmproj_auto").format(name=os.path.basename(mmproj))
+        else:
+            txt += "  ·  " + self.t("vision_no_mmproj")
+        self.vision_status_lbl.configure(text=txt, foreground=col)
+
+    def _classify_vision(self, arch, mmproj):
+        """Four-way verdict: 'vision' | 'possible' | 'text' | 'unknown'.
+        A matching projector next to an *unrecognized* architecture counts
+        as 'possible' multimodal — better than wrongly calling it text."""
+        if arch in VISION_ARCHITECTURES:
+            return "vision"
+        if arch in TEXT_ONLY_ARCHS:
+            return "text"
+        return "possible" if mmproj else "unknown"
+
+    def _vision_auto(self):
+        """Recompute the vision status line quietly on model change.
+        Uses the metadata cache already filled by update_compatibility."""
+        model = self.model_var.get().strip()
+        if not hasattr(self, "vision_status_lbl"):
+            return
+        status, arch, mmproj = "unknown", "unknown", None
+        if model and os.path.exists(model):
+            mmproj = self._auto_detect_mmproj(silent=True)
+            info = getattr(self, "_gguf_cache_info", None) or {}
+            arch = str(info.get("architecture") or "unknown").lower()
+            status = self._classify_vision(arch, bool(mmproj))
+        self._set_vision_status_text(arch, status, mmproj)
+
+    def _refresh_vision_status(self):
+        return self._vision_auto()
+
+    def _check_vision(self):
+        """🔍 Check Vision button: confirm whether the selected model can
+        see images, auto-hook its .mmproj, and explain the situation —
+        including the 'why can't ALL models have vision' question."""
+        model = self.model_var.get().strip()
+        if not model or not os.path.exists(model):
+            messagebox.showwarning(self.t("vision_msg_text_title"), self.t("vision_need_model"))
+            return
+        try:
+            info = get_model_architecture_info(model)
+            arch = str((info or {}).get("architecture") or "unknown").lower()
+        except Exception:
+            arch = "unknown"
+        mmproj = self._auto_detect_mmproj(silent=False)
+        status = self._classify_vision(arch, bool(mmproj))
+        self._set_vision_status_text(arch, status, mmproj)
+        if status == "vision":
+            if mmproj:
+                messagebox.showinfo(self.t("vision_msg_vision_title"),
+                                    self.t("vision_msg_vision_ok").format(
+                                        arch=arch, name=os.path.basename(mmproj)))
+            else:
+                stem = os.path.splitext(os.path.basename(model))[0]
+                messagebox.showwarning(self.t("vision_msg_vision_title"),
+                                       self.t("vision_msg_vision_noproj").format(arch=arch, stem=stem))
+        elif status == "possible":
+            messagebox.showinfo(self.t("vision_msg_possible_title"),
+                                self.t("vision_msg_possible_body").format(
+                                    arch=arch, name=os.path.basename(mmproj)))
+        elif status == "text":
+            messagebox.showinfo(self.t("vision_msg_text_title"),
+                                self.t("vision_msg_text_body").format(arch=arch))
+        else:
+            messagebox.showinfo(self.t("vision_msg_unknown_title"),
+                                self.t("vision_msg_unknown_body").format(arch=arch))
 
     def set_reasoning_mode(self, mode):
         self.reasoning_mode.set(mode)
@@ -3263,7 +3546,10 @@ class LlamaRunner:
     def browse_mmproj(self):
         path = filedialog.askopenfilename(
             title="Select mmproj projector",
-            filetypes=[("mmproj files", "*.mmproj"), ("All files", "*.*")],
+            filetypes=[("Projector files", "*.mmproj"),
+                       ("Projector GGUF", "*mmproj*.gguf"),
+                       ("GGUF files", "*.gguf"),
+                       ("All files", "*.*")],
             initialdir=r"D:\model"
         )
         if path:
