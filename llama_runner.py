@@ -750,14 +750,14 @@ def taskkill_tree(pid, force=False):
 PRESETS = {
     "🌟 GOD MODE (RTX 3060 Ti / 16GB / i3-12th — MAX everything)": {
         "ngl": 99, "ctx": 16384, "slots": 1, "threads": 8, "tbatch": 8,
-        "batch": 4096, "ubatch": 4096, "flash": True, "mlock": True, "unified": False, "kv_quant": True,
-        "no_mmap": True, "no_warmup": True, "defrag": 0.1,
+        "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False, "kv_quant": True,
+        "no_warmup": True, "defrag": 0.1,
         "cont_batching": True, "metrics_endpoint": True, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
     },
     "🥒 BIG PICKLE: ABSOLUTE MAX (RTX 3060 Ti / 16GB / i3-12th — beyond GOD MODE)": {
         # Everything GOD MODE pushes, plus the new-generation speed knobs on
         # top: 32K context (made affordable by q8_0 KV cache), MTP speculative
-        # decoding for the highest possible decode rate, non-MMAP + mlock so
+        # decoding for the highest possible decode rate, mlock so
         # the full model lives in fast RAM, idle-slot caching so repeat chats
         # skip reprocessing, and the server never sleeping. Requires an MTP
         # model for the speculation bonus — if yours doesn't ship an MTP head,
@@ -765,7 +765,7 @@ PRESETS = {
         "ngl": 99, "ctx": 32768, "slots": 1, "threads": 8, "tbatch": 8,
         "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False,
         "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
-        "no_mmap": True, "no_warmup": True, "defrag": 0.1,
+        "no_warmup": True, "defrag": 0.1,
         "cont_batching": True, "metrics_endpoint": True, "yarn": False,
         "moe_cpu": False, "moe_cpu_layers": 13,
         "cache_idle_slots": True, "sleep_idle": False, "sleep_idle_seconds": 300,
@@ -778,8 +778,8 @@ PRESETS = {
         # multiplies decode speed; draft count left on Auto so the server
         # picks 2 per step for GPU (best accepted-length/latency balance).
         "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 8,
-        "batch": 4096, "ubatch": 4096, "flash": True, "mlock": True, "unified": False,
-        "kv_quant": True, "no_mmap": True, "no_warmup": False, "defrag": 0.1,
+        "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False,
+        "kv_quant": True, "no_warmup": False, "defrag": 0.1,
         "cont_batching": True, "metrics_endpoint": False, "yarn": False,
         "moe_cpu": False, "moe_cpu_layers": 0,
         "spec_mode": "MTP", "spec_draft_auto": True,
@@ -805,7 +805,7 @@ PRESETS = {
         "batch": 4096, "ubatch": 4096, "defrag": 0.1,
         "flash": True, "load_mode": "mlock", "unified": False,
         "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
-        "no_mmap": False, "no_warmup": True,
+        "no_warmup": True,
         "cont_batching": True, "metrics_endpoint": False, "yarn": False,
         "moe_cpu": False, "moe_cpu_layers": 13,
         "cache_idle_slots": False, "sleep_idle": False, "sleep_idle_seconds": 600,
@@ -823,7 +823,7 @@ PRESETS = {
         "batch": 2048, "ubatch": 2048, "defrag": 0.1,
         "flash": True, "load_mode": "mlock", "unified": False,
         "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
-        "no_mmap": False, "no_warmup": False,
+        "no_warmup": False,
         "cont_batching": True, "metrics_endpoint": False, "yarn": False,
         # MoE: off by default (dense 7B-13B fits fully); 13 CPU layers is the
         # sweet spot if you switch to an MoE model like Gemma4 later.
@@ -1082,19 +1082,6 @@ TR = {
               "KV/کانتکست را تقریباً نصف می‌کند با افت کیفیت تقریباً صفر، و اجازه می‌دهد کانتکست "
               "بزرگ‌تر یا لایه‌های بیشتری در همان VRAM جا شود. برای سریع‌بودن واقعی به روشن‌بودن "
               "Flash Attention نیاز دارد (با فعال‌کردن این گزینه خودکار روشن می‌شود).",
-    },
-    "nommap_cb": {"en": "Disable mmap (load fully into RAM)", "fa": "غیرفعال‌کردن mmap (بارگذاری کامل در RAM)"},
-    "nommap_tip": {
-        "en": "--no-mmap. Normally llama.cpp memory-maps the model file and pages it in as "
-              "needed, which makes startup fast but can cause first-token stutter while pages "
-              "load. Disabling mmap forces the whole file to be read into RAM up front - slower "
-              "to start, but avoids page-fault stalls during generation once loaded. Best "
-              "combined with mlock.",
-        "fa": "--no-mmap. معمولاً llama.cpp فایل مدل را با mmap نگاشت می‌کند و صفحات آن را در "
-              "صورت نیاز بارگذاری می‌کند؛ این کار شروع را سریع می‌کند اما ممکن است در اولین "
-              "توکن‌ها با تأخیر همراه باشد. غیرفعال‌کردن mmap کل فایل را از ابتدا در RAM می‌خواند - "
-              "شروع کندتر است، اما بعد از بارگذاری، توقف‌های ناشی از page-fault در حین تولید متن "
-              "را از بین می‌برد. بهتر است همراه با mlock استفاده شود.",
     },
     "nowarmup_cb": {"en": "Skip Warmup (faster start)", "fa": "رد کردن Warmup (شروع سریع‌تر)"},
     "nowarmup_tip": {
@@ -2063,10 +2050,6 @@ class LlamaRunner:
         cb_idle = self._mkcheck(row4, "cache_idle_cb", self.cache_idle_slots_var)
         cb_idle.pack(side=tk.LEFT, padx=(0, 16))
 
-        self.no_mmap_var = tk.BooleanVar(value=False)
-        cb5 = self._mkcheck(row4, "nommap_cb", self.no_mmap_var)
-        cb5.pack(side=tk.LEFT, padx=(0, 16))
-
         self.no_warmup_var = tk.BooleanVar(value=False)
         cb6 = self._mkcheck(row4, "nowarmup_cb", self.no_warmup_var)
         cb6.pack(side=tk.LEFT)
@@ -2344,7 +2327,7 @@ class LlamaRunner:
                     self.tbatch_var, self.batch_var, self.ubatch_var, self.defrag_var,
                     self.port_var, self.flash_var, self.load_mode_var, self.unified_var,
                     self.kv_quant_var, self.ctk_var, self.ctv_var,
-                    self.no_mmap_var, self.no_warmup_var,
+                    self.no_warmup_var,
                     self.cache_idle_slots_var, self.sleep_idle_var,
                     self.sleep_idle_seconds_var, self.moe_cpu_var,
                     self.moe_cpu_layers_var, self.reasoning_format_var,
@@ -3477,7 +3460,6 @@ class LlamaRunner:
         self.ctv_var.set(p.get("ctv", "q8_0"))
         self.ubatch_var.set(p.get("ubatch", p["batch"]))
         self.defrag_var.set(p.get("defrag", 0.1))
-        self.no_mmap_var.set(p.get("no_mmap", False))
         self.no_warmup_var.set(p.get("no_warmup", False))
         # Advanced-performance toggles (optional keys, older presets skip).
         for key, var in (("cont_batching", self.cont_batching_var),
@@ -3609,7 +3591,7 @@ class LlamaRunner:
             cmd += ["-fa", "on"]
         load_mode = self.load_mode_var.get().strip()
         if load_mode and load_mode != "auto":
-            cmd += ["-lm", load_mode]
+            cmd += ["--load-mode", load_mode]
         if self.unified_var.get():
             cmd += ["--kv-unified"]
         if self.cache_idle_slots_var.get():
@@ -3623,8 +3605,6 @@ class LlamaRunner:
                 cmd += ["-ctk", ctk]
             if ctv and ctv != "off":
                 cmd += ["-ctv", ctv]
-        if self.no_mmap_var.get():
-            cmd += ["--no-mmap"]
         if self.no_warmup_var.get():
             cmd += ["--no-warmup"]
         if self.reasoning_mode.get() == "off":
