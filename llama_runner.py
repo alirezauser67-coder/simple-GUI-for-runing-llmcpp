@@ -12,6 +12,8 @@ import webbrowser
 from collections import deque
 import urllib.request
 import urllib.error
+import http.client
+import socket
 import json
 from datetime import datetime
 
@@ -46,6 +48,10 @@ PALETTE = {
     "warn":          "#fbbf24",  # amber — partial / warnings
     "danger":        "#f87171",  # red — risk / errors
     "info":          "#38bdf8",  # sky — info / progress
+    "violet":        "#a78bfa",  # violet — gradient end / accents
+    "ok_dim":        "#15803d",  # dim green — pulse "off" phase
+    "accent_dim":    "#0f766e",  # dim teal — pulse "off" phase
+    "info_dim":      "#0369a1",  # dim sky — pulse "off" phase
     "log_bg":        "#0b1120",  # near-black log well
 }
 
@@ -743,102 +749,140 @@ def taskkill_tree(pid, force=False):
 
 
 # ---------------------------------------------------------------------------
-# Hand-tuned presets. "My Rig" is dialed in for RTX 3060 Ti (8GB VRAM) +
+# Hand-tuned presets, dialed in for RTX 3060 Ti (8GB VRAM) +
 # 16GB DDR4 + Intel i3 12th gen (4C/8T) to push close to full utilization
 # without running out of VRAM/RAM on typical 7B-13B GGUF models.
 # ---------------------------------------------------------------------------
 PRESETS = {
-    "🌟 GOD MODE (RTX 3060 Ti / 16GB / i3-12th — MAX everything)": {
-        "ngl": 99, "ctx": 16384, "slots": 1, "threads": 8, "tbatch": 8,
-        "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False, "kv_quant": True,
-        "no_warmup": True, "defrag": 0.1,
-        "cont_batching": True, "metrics_endpoint": True, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
-    },
-    "🥒 BIG PICKLE: ABSOLUTE MAX (RTX 3060 Ti / 16GB / i3-12th — beyond GOD MODE)": {
-        # Everything GOD MODE pushes, plus the new-generation speed knobs on
-        # top: 32K context (made affordable by q8_0 KV cache), MTP speculative
-        # decoding for the highest possible decode rate, mlock so
-        # the full model lives in fast RAM, idle-slot caching so repeat chats
-        # skip reprocessing, and the server never sleeping. Requires an MTP
-        # model for the speculation bonus — if yours doesn't ship an MTP head,
-        # switch Spec Decoding to Auto/Ngram in the panel and it runs the same.
-        "ngl": 99, "ctx": 32768, "slots": 1, "threads": 8, "tbatch": 8,
-        "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False,
+    "🔴 THE GOD (Unsloth × GOD MODE — all layers)": {
+        # Unsloth Studio + GOD MODE fused into one: Unsloth's 32K ctx,
+        # 4 slots, jinja/reasoning extras + GOD MODE's 4K/4K batches,
+        # mlock, q8_0 KV, defrag, no-warmup speed knobs — and ALL layers
+        # on the GPU (ngl 99) for the full offload.
+        "ngl": 99, "ctx": 32640, "slots": 4, "port": 8080,
+        "threads": 8, "tbatch": 8, "batch": 4096, "ubatch": 4096,
+        "flash": True, "load_mode": "mlock", "unified": True,
         "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
-        "no_warmup": True, "defrag": 0.1,
+        "defrag": 0.1, "no_warmup": True,
         "cont_batching": True, "metrics_endpoint": True, "yarn": False,
         "moe_cpu": False, "moe_cpu_layers": 13,
-        "cache_idle_slots": True, "sleep_idle": False, "sleep_idle_seconds": 300,
-        "reasoning_format": "auto", "reasoning": "off",
-        "spec_mode": "MTP", "spec_draft_auto": True,
+        "cache_idle_slots": False, "sleep_idle": False, "sleep_idle_seconds": 600,
+        "reasoning_format": "auto", "reasoning": "on",
+        "spec_mode": "Auto",
+        "extra": ("--no-context-shift --fit off "
+                  "--slot-save-path C:\\Users\\asus\\.unsloth\\studio\\cache\\llama-slots "
+                  "--jinja --spec-default"),
     },
-    "🤖 ox-alpha (MAX tok/s — MTP spec-decode tuned)": {
-        # Built for one goal: highest tokens/sec on RTX 3060 Ti 8GB with
-        # an MTP model. Full offload + KV q8_0 frees VRAM; MTP speculation
-        # multiplies decode speed; draft count left on Auto so the server
-        # picks 2 per step for GPU (best accepted-length/latency balance).
-        "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 8,
-        "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False,
-        "kv_quant": True, "no_warmup": False, "defrag": 0.1,
-        "cont_batching": True, "metrics_endpoint": False, "yarn": False,
-        "moe_cpu": False, "moe_cpu_layers": 0,
-        "spec_mode": "MTP", "spec_draft_auto": True,
-    },
-    "⚡ Max (RTX 3060 Ti / 16GB — safe full offload)": {
-        "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 6,
-        "batch": 2048, "ubatch": 2048, "flash": True, "mlock": True, "unified": False, "kv_quant": True,
-        "cont_batching": True, "metrics_endpoint": False, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
-    },
-    "My Rig (RTX 3060 Ti / 16GB / i3-12th)": {
-        "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 6,
-        "batch": 1024, "ubatch": 1024, "flash": True, "mlock": True, "unified": False,
-        "cont_batching": False, "metrics_endpoint": False, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
-    },
-    "🏎 MAX SPEED (raw tok/s over everything)": {
-        # Every knob pointed at throughput for an RTX 3060 Ti 8GB:
-        # full GPU offload, 4K micro-batches (fast prompt processing),
-        # speculative decoding on Auto (switch Spec Decoding to MTP if your
-        # model ships an MTP head, or Ngram for chat/code), q8_0 KV cache
-        # to free VRAM, thinking OFF so reasoning models don't burn tokens,
-        # sleep-idle off so the model never has to wake/reload.
-        "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 8,
+    "🚀 MAX TPS+ (peg GPU & CPU)": {
+        # Built for one number: highest sustained tok/s on the RTX 3060 Ti
+        # / 16GB / i3-12th rig with every core and the whole GPU busy.
+        # Decode is GPU-bound → full offload + mlock (no page-in hitches)
+        # + q8_0 KV with flash attention (smaller attention footprint).
+        # Prompt eval is the other half of "speed" → 4K/4K batches and all
+        # 8 logical threads on -t/-tb so the CPU side never waits. 4K
+        # context keeps the attention span per token short (attention cost
+        # grows with sequence length). Reasoning OFF so thinking models
+        # don't burn the measured window on hidden CoT; sleep/idle caching
+        # off so nothing ever pauses mid-benchmark. Spec Auto = no flag
+        # (measured fastest on this CPU; flip to MTP/Ngram in the panel
+        # if your model likes it).
+        "ngl": 99, "ctx": 4096, "slots": 1, "threads": 8, "tbatch": 8,
         "batch": 4096, "ubatch": 4096, "defrag": 0.1,
-        "flash": True, "load_mode": "mlock", "unified": False,
+        "flash": True, "load_mode": "mlock", "unified": True,
         "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
         "no_warmup": True,
         "cont_batching": True, "metrics_endpoint": False, "yarn": False,
         "moe_cpu": False, "moe_cpu_layers": 13,
         "cache_idle_slots": False, "sleep_idle": False, "sleep_idle_seconds": 600,
         "reasoning_format": "auto", "reasoning": "off",
-        # Spec on "Auto" = no flag, which is Spec Decoding OFF in llama-server
-        # and measured fastest on CPU-limited rigs. If your model ships an MTP
-        # head, switch it to MTP for a real speculative speedup (MTP doesn't
-        # change output); Ngram is also zero-download but trained on context.
         "spec_mode": "Auto",
     },
-    "🖥 This PC (RTX 3060 Ti 8GB / 16GB — detected & tuned)": {
-        # Auto-detected hardware: RTX 3060 Ti (8GB VRAM) + 16GB RAM, i3-12th class CPU.
-        # Full GPU offload (99 layers) + q8_0 KV cache fits 7B-13B quants with an 8K context.
-        "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 6,
-        "batch": 2048, "ubatch": 2048, "defrag": 0.1,
-        "flash": True, "load_mode": "mlock", "unified": False,
-        "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
-        "no_warmup": False,
-        "cont_batching": True, "metrics_endpoint": False, "yarn": False,
-        # MoE: off by default (dense 7B-13B fits fully); 13 CPU layers is the
-        # sweet spot if you switch to an MoE model like Gemma4 later.
+    "🧪 Unsloth Studio (exact launch flags)": {
+        # Mirrors the live Unsloth llama.cpp command, minus -m / --alias
+        # (those come from the selected model). --slot-save-path, --jinja and
+        # --spec-default ride in "extra": build_command() emits no flag for
+        # Spec "Auto" or reasoning-ON, so extra supplies them verbatim.
+        # defrag -1 = disabled (the launch command carries no --defrag-thold),
+        # load_mode auto = no --load-mode flag, kv_quant off = no -ctk/-ctv.
+        "ngl": 48, "ctx": 32640, "slots": 4, "port": 8080,
+        "threads": 8, "tbatch": 8, "batch": 2048, "ubatch": 512,
+        "flash": True, "load_mode": "auto", "unified": True, "kv_quant": False,
+        "defrag": -1.0, "no_warmup": False,
+        "cont_batching": False, "metrics_endpoint": True, "yarn": False,
         "moe_cpu": False, "moe_cpu_layers": 13,
-        # New llama-server abilities: cache idle slots so returning chats skip
-        # the prompt reprocess, and put the server to sleep after 10 min idle.
-        "cache_idle_slots": True, "sleep_idle": True, "sleep_idle_seconds": 600,
-        "reasoning_format": "auto",
+        "cache_idle_slots": False, "sleep_idle": False, "sleep_idle_seconds": 600,
+        "reasoning_format": "auto", "reasoning": "on",
+        "spec_mode": "Auto",
+        "extra": ("--no-context-shift --video-fps 1 --fit off "
+                  "--slot-save-path C:\\Users\\asus\\.unsloth\\studio\\cache\\llama-slots "
+                  "--jinja --spec-default"),
+    },
+    "🌟 GOD MODE (RTX 3060 Ti / 16GB / i3-12th — MAX everything)": {
+        "ngl": 99, "ctx": 16384, "slots": 1, "threads": 8, "tbatch": 8,
+        "batch": 4096, "ubatch": 4096, "flash": True, "load_mode": "mlock", "unified": False, "kv_quant": True,
+        "no_warmup": True, "defrag": 0.1,
+        "cont_batching": True, "metrics_endpoint": True, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
+    },
+    "⚡ Max (RTX 3060 Ti / 16GB — safe full offload)": {
+        "ngl": 99, "ctx": 8192, "slots": 1, "threads": 4, "tbatch": 6,
+        "batch": 2048, "ubatch": 2048, "flash": True, "mlock": True, "unified": False, "kv_quant": True,
+        "cont_batching": True, "metrics_endpoint": False, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
     },
     "Low VRAM / Safe": {
         "ngl": 20, "ctx": 4096, "slots": 1, "threads": 4, "tbatch": 4,
         "batch": 512, "flash": True, "mlock": False, "unified": False,
         "cont_batching": False, "metrics_endpoint": False, "yarn": False, "moe_cpu": False, "moe_cpu_layers": 10,
     },
+    # --- Benchmarked speed presets (llama-bench build 11065, this rig,
+    #     2026-09-25, Qwen3.5-9B Q4_K_M): Baseline tg128 = 67.0 tok/s /
+    #     pp512 = 2146. GGML_CUDA_GRAPH_OPT=1 = 66.5 (-0.6%, re-test any
+    #     time). -bs --samplers on the real server = 64.2 vs 63.3 (+1.3%).
+    #     The first two are SMALL/overlay presets ("partial": True): they
+    #     only add their delta on top of the preset currently in use.
+    #     These three also live in the ⚡ Speed list right of the preset
+    #     selector.
+    "📊 Baseline (-fa on -t 4)": {
+        # Small overlay: force the tested baseline flags (-fa on, -t 4,
+        # -tb 6) and turn the CUDA-stream env flag OFF, while keeping the
+        # current preset's ctx / batches / extras untouched.
+        "partial": True,
+        "only": ["flash", "threads", "tbatch", "graph_opt"],
+        "flash": True, "threads": 4, "tbatch": 6, "graph_opt": False,
+    },
+    "⚡ GGML_CUDA_GRAPH_OPT=1": {
+        # Small overlay: only the concurrent Q/K/V CUDA-stream env flag,
+        # added on top of whatever preset is in use — clean A/B against
+        # the current settings. Applied to the server on next start.
+        "partial": True,
+        "only": ["graph_opt"],
+        "graph_opt": True,
+    },
+    "🏆 MiMo Ultra (16K)": {
+        # Full preset: everything measured FASTEST on this rig, at 16K
+        # context — -fa on, -t 4/-tb 6, -ub 2048 (PP), q8_0 KV so 16K
+        # still fits the 8GB card, mlock, defrag 0.1, single slot (CUDA
+        # graphs stay on), -bs + backend sampler chain (+1.3% measured),
+        # --cache-reuse 256. GGML_CUDA_GRAPH_OPT stays OFF because it
+        # measured -0.6% slower here — flip it on via the ⚡ list to A/B.
+        "ngl": 99, "ctx": 16384, "slots": 1, "port": 8080,
+        "threads": 4, "tbatch": 6, "batch": 2048, "ubatch": 2048,
+        "flash": True, "load_mode": "mlock", "unified": False,
+        "kv_quant": True, "ctk": "q8_0", "ctv": "q8_0",
+        "defrag": 0.1, "no_warmup": False,
+        "cont_batching": True, "metrics_endpoint": False, "yarn": False,
+        "moe_cpu": False, "moe_cpu_layers": 10,
+        "cache_idle_slots": False, "sleep_idle": False, "sleep_idle_seconds": 600,
+        "spec_mode": "Auto", "graph_opt": False,
+        "extra": "-bs --samplers top_k;temperature --cache-reuse 256",
+    },
 }
+# The three presets surfaced in their own ⚡ Speed list, packed right of
+# the main preset selector and applied instantly on selection.
+SPEED_PRESETS = [
+    "📊 Baseline (-fa on -t 4)",
+    "⚡ GGML_CUDA_GRAPH_OPT=1",
+    "🏆 MiMo Ultra (16K)",
+]
 CONTEXT_QUICK_VALUES = [2048, 4096, 8192, 16384, 32768, 65536]
 
 FIT_COLORS = {
@@ -877,6 +921,35 @@ TR = {
     "tab_server": {"en": "  Server Setup  ", "fa": "  تنظیمات سرور  "},
     "tab_gpu_procs": {"en": "  GPU Processes  ", "fa": "  پردازش‌های GPU  "},
     "tab_tasks": {"en": "  Run Task  ", "fa": "  اجرای کار  "},
+    "tab_inspector": {"en": "  Task Inspector  ", "fa": "  بازرس کار  "},
+
+    # --- Task Inspector tab ---
+    "insp_graph_title": {"en": "⚡ Decode speed across the whole generation",
+                         "fa": "⚡ سرعت تولید در کل پاسخ"},
+    "insp_graph_hint": {"en": "tok/s vs token index — one point per streamed chunk",
+                        "fa": "tok/s بر اساس شماره توکن — یک نقطه به ازای هر قطعه"},
+    "insp_no_data": {"en": "No task run yet — run a task to see its trace here.",
+                     "fa": "هنوز کاری اجرا نشده — برای دیدن ردپا، یک کار اجرا کنید."},
+    "insp_stats": {"en": "tokens {} · avg {:.1f} · peak {:.1f} tok/s · {:.1f}s",
+                   "fa": "توکن {} · میانگین {:.1f} · اوج {:.1f} tok/s · {:.1f}ث"},
+    "insp_system": {"en": "System Prompt (notes only — never sent to the model)",
+                    "fa": "پرامپت سیستم (قبل از پرامپت شما درج می‌شود)"},
+    "insp_system_ph": {"en": "Optional. e.g. You are a helpful assistant.",
+                       "fa": "اختیاری. مثلاً: تو یک دستیار مفید هستی."},
+    "insp_prompt": {"en": "Prompt (what you sent)", "fa": "پرامپت (آنچه فرستادید)"},
+    "insp_thinking": {"en": "Thinking / Reasoning", "fa": "تفکر / استدلال"},
+    "insp_output": {"en": "Output (final answer)", "fa": "خروجی (پاسخ نهایی)"},
+    "insp_empty": {"en": "(empty)", "fa": "(خالی)"},
+    "insp_clear": {"en": "🧹 Clear trace", "fa": "🧹 پاک کردن ردپا"},
+    "insp_copied": {"en": "Trace copied to clipboard.", "fa": "ردپا در کلیپ‌بورد کپی شد."},
+    "insp_copy": {"en": "📋 Copy trace", "fa": "📋 کپی ردپا"},
+    "insp_system_tip": {
+        "en": "Optional system prompt. When set, Run Task prepends it to the "
+              "user prompt (llama-server /completion takes a single prompt, so "
+              "the system text is merged in). Shown here for transparency.",
+        "fa": "پرامپت سیستم اختیاری. اگر پر شود، «اجرای کار» آن را قبل از پرامپت "
+              "شما می‌چسباند (چون /completion فقط یک prompt می‌گیرد).",
+    },
     "task_running": {"en": "● Server RUNNING (port {})", "fa": "● سرور در حال اجرا (پورت {})"},
     "task_not_running": {"en": "● Server not running — starts on demand", "fa": "● سرور اجرا نیست — در صورت نیاز شروع می‌شود"},
     "task_presets": {"en": "Quick:", "fa": "سریع:"},
@@ -900,6 +973,21 @@ TR = {
     "task_no_model": {"en": "Select a model in the Server Setup tab first.", "fa": "ابتدا در تب تنظیمات سرور یک مدل انتخاب کنید."},
     "task_running_task": {"en": "Generating…", "fa": "در حال تولید..."},
     "task_done": {"en": "Done", "fa": "تمام"},
+    "task_kill": {"en": "⏹ Kill Task", "fa": "⏹ لغو کار"},
+    "task_kill_tip": {
+        "en": "Cancel ONLY the generation currently running — the server "
+              "process stays up and keeps serving. Works by dropping this "
+              "request's connection, which llama-server treats as a cancel "
+              "and frees the slot immediately (verified live).",
+        "fa": "فقط همین تولید در حال اجرا را لغو کن — خود پردازش سرور بالا "
+              "می‌ماند و به کار ادامه می‌دهد. با قطع اتصال همین درخواست "
+              "انجام می‌شود که سرور آن را لغو تلقی کرده و اسلات را فوراً "
+              "آزاد می‌کند (روی سرور واقعی آزمایش شده).",
+    },
+    "task_cancelled": {"en": "Cancelled — server still running",
+                       "fa": "لغو شد — سرور همچنان در حال اجرا"},
+    "task_no_idle": {"en": "No task running — nothing to cancel.",
+                     "fa": "کاری در حال اجرا نیست — چیزی لغو نشد."},
     "gpu_mon_title": {"en": "GPU Monitor", "fa": "مانیتور GPU"},
     "mon_system": {"en": "System", "fa": "سیستم"},
     "mon_cpu": {"en": "CPU", "fa": "پردازنده"},
@@ -966,6 +1054,10 @@ TR = {
     "model_tip": {"en": "The GGUF model file llama-server should load.",
                   "fa": "فایل مدل GGUF که llama-server باید بارگذاری کند."},
     "server_label": {"en": "Server exe:", "fa": "فایل سرور:"},
+    # Auto-scanning server-location dropdown (rescans C:\llmcap on open).
+    "srv_preset_def": {"en": "default", "fa": "پیش‌فرض"},
+    "srv_preset_tip": {"en": "Server locations found under C:\\llmcap — rescanned every time the list opens, so a new folder shows up automatically.",
+                       "fa": "مسیرهای سرور در C:\\llmcap — با هر باز شدن لیست دوباره جستجو می‌شود؛ پوشهٔ جدید خودکار اضافه می‌شود."},
     "server_tip": {"en": "Path to llama-server.exe (or llama-server on Linux/Mac).",
                    "fa": "مسیر فایل llama-server.exe (یا llama-server در لینوکس/مک)."},
     "analyze_btn": {"en": "🔍 Recommend Settings For This Model",
@@ -976,6 +1068,26 @@ TR = {
     "preset_tip": {"en": "Ready-made setting bundles for common hardware.",
                    "fa": "مجموعه تنظیمات آماده برای سخت‌افزارهای رایج."},
     "apply_preset_btn": {"en": "Apply Preset", "fa": "اعمال پیش‌تنظیم"},
+    "speed_preset_label": {"en": "⚡ Speed:", "fa": "⚡ سرعت:"},
+    "speed_preset_tip": {
+        "en": "Applies instantly. Small presets ADD to the preset currently "
+              "in use (Baseline = -fa on -t 4, GGML_CUDA_GRAPH_OPT=1 = "
+              "env flag only); MiMo Ultra is a full 16K max-speed preset.",
+        "fa": "بلافاصله اعمال می‌شود. پیش‌تنظیم‌های کوچک به پیش‌تنظیم فعلی "
+              "اضافه می‌شوند (پایه = -fa on -t 4، GGML_CUDA_GRAPH_OPT=1 = "
+              "فقط کلید env)؛ MiMo Ultra یک پیش‌تنظیم کامل ۱۶K است.",
+    },
+    "graph_opt_label": {"en": "⚡ CUDA streams", "fa": "⚡ جریان‌های CUDA"},
+    "graph_opt_tip": {
+        "en": "GGML_CUDA_GRAPH_OPT=1 — concurrent Q/K/V CUDA streams, applied "
+              "only when the server next starts. Measured on this rig: 66.5 vs "
+              "67.0 tok/s (-0.6%), so leave it off unless a new build/driver "
+              "changes that.",
+        "fa": "GGML_CUDA_GRAPH_OPT=1 — جریان‌های هم‌زمان Q/K/V؛ فقط در اجرای "
+              "بعدی سرور اعمال می‌شود. نتیجه تست روی همین سیستم: ۶۶٫۵ در مقابل "
+              "۶۷٫۰ (۰٫۶-٪)، پس خاموش بماند مگر بیلد/درایور جدید چیز دیگری "
+              "نشان دهد.",
+    },
 
     "gpu_layers_label": {"en": "GPU Layers:", "fa": "لایه‌های GPU:"},
     "gpu_layers_tip": {
@@ -1051,6 +1163,18 @@ TR = {
     "port_tip": {"en": "Local port the HTTP server will listen on.",
                  "fa": "پورت محلی که سرور HTTP روی آن گوش می‌دهد."},
 
+    "temp_label": {"en": "Temperature:", "fa": "دما:"},
+    "temp_tip": {
+        "en": "--temp. Server-side sampling temperature (0.0-2.0); llama.cpp's "
+              "default is 0.8. Lower = more deterministic, higher = more "
+              "creative. This is the server-wide default — the Run Task tab "
+              "has its own temperature spinbox which overrides it per request.",
+        "fa": "--temp. دمای نمونه‌گیری سمت سرور (۰.۰ تا ۲.۰)؛ پیش‌فرض llama.cpp "
+              "برابر 0.8 است. مقادیر پایین‌تر = پاسخ قطعی‌تر، بالاتر = "
+              "خلاقانه‌تر. این مقدار پیش‌فرض سراسری سرور است — تب Run Task "
+              "دکمهٔ دمای خودش را دارد که روی هر درخواست بازنویسی می‌کند.",
+    },
+
     "flash_cb": {"en": "Flash Attention", "fa": "Flash Attention"},
     "flash_tip": {
         "en": "Faster, more memory-efficient attention kernel (-fa on). Recommended on "
@@ -1103,6 +1227,18 @@ TR = {
               "در بیکاری، انتخاب چند کارت گرافیک و تغییر بافر تک‌تک تنسورها. برای استفاده از "
               "پیش‌فرض‌های خود سرور، همه را خاموش/خالی بگذارید.",
     },
+    # Mini dih.py speed test, lives inside Advanced Performance.
+    "bench_btn": {"en": "⏱ Speed Test", "fa": "⏱ سرعت‌سنج"},
+    "bench_tip": {
+        "en": "Mini benchmark of the currently loaded model (mini dih.py): streams a fixed "
+              "prompt and reports TTFT + tok/s + prompt speed. Server must be running.",
+        "fa": "بنچمارک کوچک مدل بارگذاری‌شده (نسخه کوچک dih.py): یک پرامپت ثابت را استریم می‌کند "
+              "و زمان اولین توکن + سرعت tok/s را نشان می‌دهد. سرور باید در حال اجرا باشد.",
+    },
+    "bench_idle": {"en": "no test yet", "fa": "هنوز تستی نشده"},
+    "bench_running": {"en": "testing the current model…", "fa": "در حال تست مدل فعلی..."},
+    "bench_not_ready": {"en": "server not ready — start it first", "fa": "سرور آماده نیست — اول اجرا کنید"},
+    "bench_task_busy": {"en": "a Run Task is in progress — wait for it", "fa": "یک کار در حال اجراست — صبر کنید"},
     "cont_batching_cb": {"en": "Continuous Batching", "fa": "بچینگ پیوسته"},
     "cont_batching_tip": {
         "en": "Enable continuous batching (--cont-batching). Allows new requests to be batched "
@@ -1202,26 +1338,43 @@ TR = {
         "fa": "تغییر نوع بافر تنسورها (-ot). جفت‌های <الگو>=<بافر> جدا شده با ویرگول؛ هر کدام به‌صورت "
               "یک پرچم -ot جدا ارسال می‌شود. مثال: blk\\.(0|1)\\.ffn_.*=CPU",
     },
-    "mmproj_section": {"en": "👁 Multimodal (mmproj)", "fa": "👁 چندرسانه‌ای (mmproj)"},
+    "mmproj_section": {"en": "👁 Multimodal & MTP", "fa": "👁 چندرسانه‌ای و MTP"},
     "mmproj_desc": {
-        "en": "For vision models only: point llama-server at an mmproj projector file so it can "
-              "understand images. Use either a local file OR a URL — never both (the local file "
-              "wins if both are set). Leave empty for text-only models.",
-        "fa": "فقط برای مدل‌های بینایی: فایل پروجکتور mmproj را به llama-server بدهید تا تصاویر را "
-              "بفهمد. از فایل محلی یا آدرس اینترنتی استفاده کنید - هرگز هر دو را با هم نه (در صورت "
-              "تنظیم هر دو، فایل محلی استفاده می‌شود). برای مدل‌های متنی خالی بگذارید.",
+        "en": "Two model add-ons, each with its own ON/OFF switch: an mmproj "
+              "projector so vision models can see images, and a separate MTP "
+              "draft model (e.g. mtp-gemma-4-…-Q4_0.gguf) for multi-token "
+              "speculation. Paths are remembered when switched off — only the "
+              "flag stops being sent.",
+        "fa": "دو افزونهٔ مدل، هر کدام با کلید روشن/خاموش خودش: پروجکتور mmproj "
+              "برای دیدن تصاویر، و یک مدل MTP جداگانه (مثلاً mtp-gemma-4-…-Q4_0.gguf) "
+              "برای پیش‌بینی چندتوکنی. مسیرها موقع خاموش‌شدن حفظ می‌شوند — فقط "
+              "پرچم ارسال نمی‌شود.",
     },
     "mmproj_file_label": {"en": "mmproj file:", "fa": "فایل mmproj:"},
     "mmproj_file_tip": {
         "en": "Local .mmproj multimodal projector file (--mmproj). Needed for vision models.",
         "fa": "فایل پروجکتور چندرسانه‌ای محلی .mmproj ‏(--mmproj). برای مدل‌های بینایی لازم است.",
     },
-    "mmproj_url_label": {"en": "mmproj URL:", "fa": "آدرس mmproj:"},
-    "mmproj_url_tip": {
-        "en": "Remote URL of a multimodal projector (-mmu / --mmproj-url). Only used when no local "
-              "mmproj file is set (the two are never sent together).",
-        "fa": "آدرس راه‌دور پروجکتور چندرسانه‌ای (-mmu / --mmproj-url). فقط وقتی استفاده می‌شود که فایل "
-              "محلی mmproj تنظیم نشده باشد (هر دو هرگز با هم ارسال نمی‌شوند).",
+    "mtp_file_label": {"en": "MTP model:", "fa": "مدل MTP:"},
+    "mtp_file_tip": {
+        "en": "Separate MTP draft GGUF (--spec-draft-model), e.g. "
+              "mtp-gemma-4-12B-it-Q4_0.gguf — keep it next to the main model. "
+              "When the toggle is ON the server loads it and forces "
+              "--spec-type draft-mtp for multi-token prediction speculation.",
+        "fa": "فایل MTP جداگانه ‏(--spec-draft-model)، مثلاً "
+              "mtp-gemma-4-12B-it-Q4_0.gguf — کنار مدل اصلی بگذارید. وقتی کلید "
+              "روشن باشد سرور آن را لود کرده و ‏--spec-type draft-mtp را برای "
+              "پیش‌بینی چندتوکنی اجباری می‌کند.",
+    },
+    "mmproj_toggle_tip": {
+        "en": "ON = send --mmproj at startup. OFF = keep the path but send no flag.",
+        "fa": "روشن = ‏--mmproj هنگام شروع ارسال شود. خاموش = مسیر حفظ شود ولی پرچمی ارسال نشود.",
+    },
+    "mtp_toggle_tip": {
+        "en": "ON = load this MTP draft model (--spec-draft-model + --spec-type draft-mtp). "
+              "OFF = no speculation, server runs plain.",
+        "fa": "روشن = این مدل MTP لود شود ‏(--spec-draft-model + --spec-type draft-mtp). "
+              "خاموش = بدون speculation، سرور ساده اجرا شود.",
     },
     "vision_check_btn": {"en": "🔍 Check Vision", "fa": "🔍 بررسی بینایی"},
     "vision_check_tip": {
@@ -1446,6 +1599,24 @@ TR = {
               "اولین توکن خروجی، سرعت پردازش پرامپت اینجا نمایش داده می‌شود.",
     },
     "uptime_prefix": {"en": "Uptime:", "fa": "زمان اجرا:"},
+    "ctx_pill_idle": {"en": "Ctx --", "fa": "کانتکست --"},
+    "ctx_pill_na": {"en": "Ctx n/a", "fa": "کانتکست در دسترس نیست"},
+    "ctx_pill_free": {"en": "free", "fa": "آزاد"},
+    "ctx_pill_tip": {
+        "en": "Accurate live context usage: each slot's occupancy "
+              "(n_prompt_tokens from llama-server's /slots — prompt tokens "
+              "plus generation, summed across all slots) against the -c "
+              "total captured at launch. 'free' is how many context tokens "
+              "remain before the server must start truncating. Falls back "
+              "to the server log (last prompt + generation) if /slots "
+              "doesn't report occupancy.",
+        "fa": "مصرف دقیق و لحظه‌ای کانتکست: اشغال‌شدگی هر اسلات "
+              "(n_prompt_tokens از ‏/slots سرور — توکن‌های پرامپت به‌علاوه "
+              "تولید، مجموع‌شده روی همه اسلات‌ها) در برابر مقدار کل ‑c "
+              "زمان اجرا. «آزاد» یعنی چند توکن تا پر شدن کانتکست مانده است. "
+              "اگر /slots اطلاعی نداد، از لاگ سرور (آخرین پرامپت + تولید) "
+              "استفاده می‌شود.",
+    },
     "checking_hardware": {"en": "? Checking hardware...", "fa": "؟ در حال بررسی سخت‌افزار..."},
     "browse_btn": {"en": "Browse", "fa": "انتخاب فایل"},
 
@@ -1491,6 +1662,21 @@ class LlamaRunner:
         self.speed_samples = deque(maxlen=5)
         # Session token accounting, fed by the server log's eval-time lines.
         self.token_stats = {"gen": 0, "prompt": 0, "prompt_tps": None}
+        # Live context pill: -c captured at launch + last /slots reading.
+        self._run_ctx_total = 0
+        self._last_ctx = None
+        self._ctx_slots_fresh = False   # /slots has reported real occupancy
+        self._ctx_log_est = 0           # stdout eval-line fallback estimate
+        self._pending_prompt_n = 0
+        # Run Task cancellation: event + the live HTTP connection whose
+        # socket shutdown makes llama-server cancel just that generation.
+        self._task_cancel_evt = None
+        self._task_conn = None
+        # Task Inspector: last-run trace + streamed decode-speed series.
+        # series = [(token_index, tok_per_s), ...]; reset per run.
+        self.insp_series = []
+        self.insp_t0 = None
+        self._insp_last_flush = 0.0
         self._gguf_cache_path = None
         self._gguf_cache_info = None
 
@@ -1648,12 +1834,20 @@ class LlamaRunner:
         self.update_compatibility()
         if getattr(self, "spec_hint_lbl", None):
             self._update_spec_controls()
+        # Re-registration above may have reset the server-state labels to
+        # the static "not running" text — recompute from live health.
+        self._update_task_server_state()
         if not self.process:
             self.load_status_var.set(self.t("load_status_idle"))
             self.load_status_label.config(font=self.fa_font(10, "bold") if self.lang == "fa" else self.en_font(10, "bold"))
             self.status_var.set(self.t("status_ready"))
+            if getattr(self, "ctx_pill_var", None):
+                self.ctx_pill_var.set(self.t("ctx_pill_idle"))
+                self._ctx_pill_color(S("fg_muted"))
         else:
             self.load_status_label.config(font=self.fa_font(10, "bold") if self.lang == "fa" else self.en_font(10, "bold"))
+            if getattr(self, "ctx_pill_var", None) and getattr(self, "_last_ctx", None):
+                self._render_ctx(*self._last_ctx)
 
     def _restyle_header(self):
         """Re-face the title/subtitle/lang button to the active language.
@@ -1705,6 +1899,105 @@ class LlamaRunner:
         provide, using only existing palette colors."""
         widget.bind("<Enter>", lambda e: widget.config(bg=hover_bg))
         widget.bind("<Leave>", lambda e: widget.config(bg=normal_bg))
+
+    # ------------------------------------------------------------------
+    # Lightweight UI motion: one shared pulse heartbeat + gradient strip.
+    # Everything here is event-driven — when the app is idle nothing is
+    # scheduled, so CPU/GPU cost is effectively zero at rest.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _hex(color):
+        color = str(color).lstrip("#")
+        return tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _draw_gradient(self, event=None):
+        """Paint the teal→sky→violet accent strip. Runs only at build
+        time and on window resize — never on a timer."""
+        c = getattr(self, "_grad_canvas", None)
+        if c is None:
+            return
+        w = c.winfo_width()
+        if w < 8:
+            return
+        c.delete("g")
+        stops = [self._hex(S("accent")), self._hex(S("info")),
+                 self._hex(S("violet"))]
+        step = max(2, w // 60)
+        for x in range(0, w, step):
+            t = x / max(1, w - 1)
+            if t < 0.5:
+                a, b, k = stops[0], stops[1], t / 0.5
+            else:
+                a, b, k = stops[1], stops[2], (t - 0.5) / 0.5
+            col = "#%02x%02x%02x" % tuple(
+                int(a[i] + (b[i] - a[i]) * k) for i in range(3))
+            c.create_rectangle(x, 0, min(x + step, w), 4,
+                               fill=col, outline=col, tags="g")
+
+    def _ensure_pulse(self):
+        """Arm the shared 700ms pulse if it isn't already pending."""
+        if not getattr(self, "_pulse_pending", False):
+            self._pulse_pending = True
+            self.root.after(700, self._pulse_tick)
+
+    def _pulse_tick(self):
+        """Single heartbeat for every live indicator: server status pill,
+        Run Task server badge, generating status + big tok/s number, and
+        the GPU LIVE badge — they breathe between bright and dim palette
+        colors. Re-arms ONLY while something is active; when all are idle
+        the loop ends and the UI costs nothing."""
+        self._pulse_pending = False
+        phase = not getattr(self, "_pulse_phase", False)
+        self._pulse_phase = phase
+        running = bool((self.process and self.process.poll() is None)
+                       or getattr(self, "_health_probe_ok", False))
+        task_busy = bool(getattr(self, "_task_busy", False))
+        gpu_live = bool(getattr(self, "_gpu_refresh_enabled", False)
+                        and getattr(self, "_gpu_mon_active", False))
+        if running:
+            try:
+                self.status_lbl.config(
+                    fg=S("ok") if phase else S("ok_dim"))
+            except (tk.TclError, AttributeError):
+                pass
+            try:
+                self.task_server_state.config(
+                    fg=S("ok") if phase else S("ok_dim"))
+            except (tk.TclError, AttributeError):
+                pass
+        if task_busy:
+            try:
+                self.task_status.config(
+                    fg=S("accent") if phase else S("info"))
+                self.task_tps.config(
+                    fg=S("info") if phase else S("accent"))
+            except (tk.TclError, AttributeError):
+                pass
+        if gpu_live:
+            try:
+                self.gpu_mon_live.config(
+                    fg=S("ok") if phase else S("ok_dim"))
+            except (tk.TclError, AttributeError):
+                pass
+        if running or task_busy or gpu_live:
+            self._pulse_pending = True
+            self.root.after(700, self._pulse_tick)
+
+    def _set_busy_ui(self, busy):
+        """Show/hide the indeterminate spinner next to the load pill.
+        Packed + animating ONLY while the server is starting/loading;
+        fully removed when idle so no timer keeps running at rest."""
+        try:
+            if busy:
+                if not self.busy_pb.winfo_ismapped():
+                    self.busy_pb.pack(side=tk.LEFT, padx=(0, 8),
+                                      after=self.load_status_label)
+                self.busy_pb.start(60)
+            else:
+                self.busy_pb.stop()
+                self.busy_pb.pack_forget()
+        except (tk.TclError, AttributeError):
+            pass
 
     def _progress_style_name(self, pct):
         """Shared color-threshold rule for every usage meter in the app."""
@@ -1843,6 +2136,16 @@ class LlamaRunner:
         style.map("Info.TButton",
                   background=[("pressed", S("border")), ("active", accent)],
                   foreground=[("pressed", S("fg")), ("active", bg)])
+        # Kill Task (server-tab twin): red text like a destructive action
+        # but on the neutral chip, with a readable disabled state so it is
+        # always visible even before a task is running.
+        style.configure("Kill.TButton", background=surf, foreground=danger,
+                        font=(_LATIN_FONT_FAMILY, 10, "bold"), padding=7,
+                        borderwidth=0, relief=tk.FLAT)
+        style.map("Kill.TButton",
+                  background=[("pressed", S("border")), ("active", surf_hi)],
+                  foreground=[("disabled", muted), ("pressed", S("fg")),
+                              ("active", danger)])
 
         self.bg, self.surf, self.surf_hi = bg, surf, surf_hi
         self.fg, self.muted = fg, muted
@@ -1869,6 +2172,37 @@ class LlamaRunner:
             tip = Tooltip(cb, self.t(tip_key))
             self._reg(tip, tip_key, "tooltip")
         return cb
+
+    def _mk_toggle(self, parent, var, tip_key=None, dim=None):
+        """Flat ON/OFF switch button bound to a BooleanVar.
+
+        Green '● ON' while the flag will be sent, grey '○ OFF' when the
+        value is remembered but skipped. `dim` (usually the path Entry)
+        greys out alongside OFF so the state reads at a glance."""
+        btn = tk.Button(parent, bd=0, cursor="hand2", padx=10, pady=1,
+                        font=self.en_font(9, "bold"))
+
+        def paint(*_):
+            on = bool(var.get())
+            btn.config(text="● ON" if on else "○ OFF",
+                       bg=S("ok") if on else S("surface_hi"),
+                       fg=S("bg") if on else S("fg_muted"),
+                       activebackground=S("surface"),
+                       activeforeground=S("fg"))
+            if dim is not None:
+                try:
+                    dim.config(fg=S("fg") if on else S("fg_muted"))
+                except tk.TclError:
+                    pass
+
+        btn.config(command=lambda: var.set(not var.get()))
+        var.trace_add("write", paint)
+        paint()
+        btn.pack(side=tk.LEFT, padx=(6, 0))
+        if tip_key:
+            tip = Tooltip(btn, self.t(tip_key))
+            self._reg(tip, tip_key, "tooltip")
+        return btn
 
     # ------------------------------------------------------------------
     # Tab 1: Server setup (files, params, start/stop, log)
@@ -1903,6 +2237,19 @@ class LlamaRunner:
         self.browse_server_btn = ttk.Button(server_frame, text=self.t("browse_btn"), command=self.browse_server)
         self.browse_server_btn.pack(side=tk.LEFT)
         self._reg(self.browse_server_btn, "browse_btn", "button")
+        # Auto-scanning preset dropdown: every llama-server.exe found under
+        # C:\llmcap (root exe = "default", others named by their folder).
+        # Rescanned each time the dropdown opens, so dropping a new folder
+        # into C:\llmcap makes it appear automatically — no restart needed.
+        self.srv_preset_combo = ttk.Combobox(server_frame, state="readonly",
+                                             width=14,
+                                             postcommand=self._scan_server_presets)
+        self.srv_preset_combo.pack(side=tk.LEFT, padx=(6, 0))
+        self.srv_preset_combo.bind("<<ComboboxSelected>>", self._on_server_preset)
+        self._srv_preset_paths = {}
+        self._scan_server_presets()
+        srv_combo_tip = Tooltip(self.srv_preset_combo, self.t("srv_preset_tip"))
+        self._reg(srv_combo_tip, "srv_preset_tip", "tooltip")
 
         # --- Compatibility badge ---
         self.badge_frame = ttk.Frame(files_frame)
@@ -1934,8 +2281,20 @@ class LlamaRunner:
         self._reg(self.preset_label_widget, "preset_label", "label")
         self.preset_var = tk.StringVar(value="⚡ Max (RTX 3060 Ti / 16GB — safe full offload)")
         preset_combo = ttk.Combobox(preset_frame, textvariable=self.preset_var, state="readonly",
-                                     values=list(PRESETS.keys()), width=34)
+                                     values=list(PRESETS.keys()), width=26)
         preset_combo.pack(side=tk.LEFT, padx=(0, 8))
+        # Benchmarked speed presets in their own list right of the main
+        # selector — selecting one applies it immediately (no Apply click).
+        self.speed_preset_label = ttk.Label(preset_frame, text=self.t("speed_preset_label"), font=self.en_font(9, "bold"))
+        self.speed_preset_label.pack(side=tk.LEFT, padx=(0, 6))
+        self._reg(self.speed_preset_label, "speed_preset_label", "label")
+        self.speed_preset_var = tk.StringVar(value="")
+        self.speed_preset_combo = ttk.Combobox(preset_frame, textvariable=self.speed_preset_var, state="readonly",
+                                               values=SPEED_PRESETS, width=22)
+        self.speed_preset_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self.speed_preset_combo.bind("<<ComboboxSelected>>", self._on_speed_preset)
+        speed_tip = Tooltip(self.speed_preset_combo, self.t("speed_preset_tip"))
+        self._reg(speed_tip, "speed_preset_tip", "tooltip")
         self.apply_preset_btn = ttk.Button(preset_frame, text=self.t("apply_preset_btn"), style="Info.TButton",
                                             command=self.apply_preset)
         self.apply_preset_btn.pack(side=tk.LEFT)
@@ -1988,6 +2347,14 @@ class LlamaRunner:
         self._labeled(row2b, "defrag_label", width=18)
         self.defrag_var = tk.DoubleVar(value=0.1)
         ttk.Spinbox(row2b, from_=-1.0, to=1.0, increment=0.05, textvariable=self.defrag_var, width=6, format="%.2f").pack(side=tk.LEFT)
+
+        # Server-wide sampling temperature (--temp). Defaults to llama.cpp's
+        # own 0.8; Run Task's spinbox overrides it per request.
+        self._labeled(row2b, "temp_label", width=11)
+        self.temp_server_var = tk.DoubleVar(value=0.8)
+        ttk.Spinbox(row2b, from_=0.0, to=2.0, increment=0.1,
+                    textvariable=self.temp_server_var, width=5,
+                    format="%.1f").pack(side=tk.LEFT, padx=(0, 16))
 
         row3 = ttk.Frame(params_frame)
         row3.pack(fill=tk.X, pady=4)
@@ -2143,6 +2510,36 @@ class LlamaRunner:
         ot_tip = Tooltip(ot_entry, self.t("ot_tip"))
         self._reg(ot_tip, "ot_tip", "tooltip")
 
+        # Row 6: mini speed test of the CURRENTLY LOADED model (mini dih.py)
+        # — one button + one result line, nothing else (kept tiny on purpose).
+        adv_row6 = ttk.Frame(adv_frame)
+        adv_row6.pack(fill=tk.X, pady=(6, 2))
+        self.bench_btn = tk.Button(adv_row6, text=self.t("bench_btn"), bd=0,
+                                   cursor="hand2", bg=S("surface_hi"), fg=S("info"),
+                                   activebackground=S("surface"),
+                                   activeforeground=S("info"),
+                                   padx=12, pady=5,
+                                   font=self.en_font(10, "bold"),
+                                   command=self.run_speed_test)
+        self.bench_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self._reg(self.bench_btn, "bench_btn", "button")
+        # Hover glow: fills solid sky-blue (text flips to dark).
+        self.bench_btn.bind("<Enter>",
+                            lambda e: self.bench_btn.config(bg=S("info"),
+                                                            fg=S("bg")))
+        self.bench_btn.bind("<Leave>",
+                            lambda e: self.bench_btn.config(bg=S("surface_hi"),
+                                                            fg=S("info")))
+        bench_tip = Tooltip(self.bench_btn, self.t("bench_tip"))
+        self._reg(bench_tip, "bench_tip", "tooltip")
+        self.bench_result_lbl = ttk.Label(adv_row6, text=self.t("bench_idle"),
+                                          font=("Consolas", 9),
+                                          foreground=S("fg_muted"))
+        self.bench_result_lbl.pack(side=tk.LEFT)
+        self._reg(self.bench_result_lbl, "bench_idle", "label")
+        self._bench_busy = False
+        self._bench_conn = None
+
         # --- Reasoning / thinking toggle, for hybrid reasoning models like
         # Qwen3, DeepSeek-R1, QwQ. No effect on regular non-reasoning models. ---
         reasoning_frame = ttk.LabelFrame(parent, text=self.t("reasoning_section"), padding=8)
@@ -2271,6 +2668,7 @@ class LlamaRunner:
         mmf_lbl.pack(side=tk.LEFT, padx=(0, 5))
         self._reg(mmf_lbl, "mmproj_file_label", "label")
         self.mmproj_path_var = tk.StringVar(value="")
+        self.mmproj_enabled_var = tk.BooleanVar(value=True)
         mmf_entry = ttk.Entry(mm_file_row, textvariable=self.mmproj_path_var)
         mmf_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         mmf_tip = Tooltip(mmf_entry, self.t("mmproj_file_tip"))
@@ -2279,17 +2677,30 @@ class LlamaRunner:
                                              command=self.browse_mmproj)
         self.browse_mmproj_btn.pack(side=tk.LEFT)
         self._reg(self.browse_mmproj_btn, "browse_btn", "button")
+        self.mmproj_toggle_btn = self._mk_toggle(
+            mm_file_row, self.mmproj_enabled_var, "mmproj_toggle_tip",
+            dim=mmf_entry)
 
-        mm_url_row = ttk.Frame(mm_frame)
-        mm_url_row.pack(fill=tk.X, pady=4)
-        mmu_lbl = ttk.Label(mm_url_row, text=self.t("mmproj_url_label"), width=14, anchor=tk.W)
-        mmu_lbl.pack(side=tk.LEFT, padx=(0, 5))
-        self._reg(mmu_lbl, "mmproj_url_label", "label")
-        self.mmproj_url_var = tk.StringVar(value="")
-        mmu_entry = ttk.Entry(mm_url_row, textvariable=self.mmproj_url_var)
-        mmu_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        mmu_tip = Tooltip(mmu_entry, self.t("mmproj_url_tip"))
-        self._reg(mmu_tip, "mmproj_url_tip", "tooltip")
+        # --- MTP draft model (separate GGUF, e.g. mtp-gemma-4-…-Q4_0.gguf).
+        # ON emits --spec-draft-model + forces --spec-type draft-mtp. ---
+        mtp_file_row = ttk.Frame(mm_frame)
+        mtp_file_row.pack(fill=tk.X, pady=4)
+        mtp_lbl = ttk.Label(mtp_file_row, text=self.t("mtp_file_label"), width=14, anchor=tk.W)
+        mtp_lbl.pack(side=tk.LEFT, padx=(0, 5))
+        self._reg(mtp_lbl, "mtp_file_label", "label")
+        self.mtp_model_var = tk.StringVar(value="")
+        self.mtp_enabled_var = tk.BooleanVar(value=False)
+        mtp_entry = ttk.Entry(mtp_file_row, textvariable=self.mtp_model_var)
+        mtp_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        mtp_tip = Tooltip(mtp_entry, self.t("mtp_file_tip"))
+        self._reg(mtp_tip, "mtp_file_tip", "tooltip")
+        self.browse_mtp_btn = ttk.Button(mtp_file_row, text=self.t("browse_btn"),
+                                          command=self.browse_mtp)
+        self.browse_mtp_btn.pack(side=tk.LEFT)
+        self._reg(self.browse_mtp_btn, "browse_btn", "button")
+        self.mtp_toggle_btn = self._mk_toggle(
+            mtp_file_row, self.mtp_enabled_var, "mtp_toggle_tip",
+            dim=mtp_entry)
 
         mm_vis_row = ttk.Frame(mm_frame)
         mm_vis_row.pack(fill=tk.X, pady=(6, 0))
@@ -2310,6 +2721,15 @@ class LlamaRunner:
         self._labeled(extra_frame, "extra_args_label", width=13)
         self.extra_var = tk.StringVar()
         ttk.Entry(extra_frame, textvariable=self.extra_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        # Env flag surfaced as a checkbox: presets flip it, and it only
+        # affects the llama-server child process (never the whole app).
+        self.graph_opt_var = tk.BooleanVar(value=False)
+        self.graph_opt_btn = ttk.Checkbutton(extra_frame, text=self.t("graph_opt_label"),
+                                             variable=self.graph_opt_var)
+        self.graph_opt_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._reg(self.graph_opt_btn, "graph_opt_label", "button")
+        graph_tip = Tooltip(self.graph_opt_btn, self.t("graph_opt_tip"))
+        self._reg(graph_tip, "graph_opt_tip", "tooltip")
 
         # --- Command preview ---
         preview_frame = ttk.Frame(parent)
@@ -2325,6 +2745,7 @@ class LlamaRunner:
         preview_entry.configure(style="Mono.TEntry", font=("Consolas", 9))
         for var in (self.ngl_var, self.ctx_var, self.slots_var, self.threads_var,
                     self.tbatch_var, self.batch_var, self.ubatch_var, self.defrag_var,
+                    self.temp_server_var,
                     self.port_var, self.flash_var, self.load_mode_var, self.unified_var,
                     self.kv_quant_var, self.ctk_var, self.ctv_var,
                     self.no_warmup_var,
@@ -2332,7 +2753,8 @@ class LlamaRunner:
                     self.sleep_idle_seconds_var, self.moe_cpu_var,
                     self.moe_cpu_layers_var, self.reasoning_format_var,
                     self.devices_var, self.override_tensor_var,
-                    self.mmproj_path_var, self.mmproj_url_var,
+                    self.mmproj_path_var, self.mmproj_enabled_var,
+                    self.mtp_model_var, self.mtp_enabled_var,
                     self.spec_mode_var, self.spec_draft_nmax_var, self.spec_draft_cache_var,
                     self.extra_var, self.model_var, self.server_var):
             var.trace_add("write", lambda *a: self.update_preview())
@@ -2349,12 +2771,27 @@ class LlamaRunner:
         self.copy_btn = ttk.Button(btn_frame, text=self.t("copy_btn"), command=self.copy_command)
         self.copy_btn.pack(side=tk.LEFT, padx=5)
         self._reg(self.copy_btn, "copy_btn", "button")
+        # Kill Task twin right beside Copy Command — always clickable (red
+        # on the neutral chip); clicking with nothing running just reports
+        # "no task" instead of sitting there gray and dead.
+        self.kill_task_btn_srv = ttk.Button(btn_frame, text=self.t("task_kill"),
+                                            style="Kill.TButton",
+                                            command=self.kill_task)
+        self.kill_task_btn_srv.pack(side=tk.LEFT, padx=5)
+        self._reg(self.kill_task_btn_srv, "task_kill", "button")
+        kill_srv_tip = Tooltip(self.kill_task_btn_srv, self.t("task_kill_tip"))
+        self._reg(kill_srv_tip, "task_kill_tip", "tooltip")
         self.clear_btn = ttk.Button(btn_frame, text=self.t("clear_btn"), command=self.clear_log)
         self.clear_btn.pack(side=tk.RIGHT, padx=5)
         self._reg(self.clear_btn, "clear_btn", "button")
 
         self.status_var = tk.StringVar(value=self.t("status_ready"))
-        ttk.Label(btn_frame, textvariable=self.status_var, foreground=S("ok")).pack(side=tk.LEFT, padx=20)
+        # Pill-style status chip (colored face + breathing pulse while live).
+        self.status_lbl = tk.Label(btn_frame, textvariable=self.status_var,
+                                   bg=S("surface_hi"), fg=S("ok"),
+                                   font=self.en_font(9, "bold"),
+                                   padx=10, pady=3, bd=0)
+        self.status_lbl.pack(side=tk.LEFT, padx=20)
 
         status_bar = ttk.Frame(parent)
         status_bar.pack(fill=tk.X, pady=(0, 8))
@@ -2364,6 +2801,9 @@ class LlamaRunner:
                                            font=self.en_font(10, "bold"),
                                            padx=10, pady=5, bd=0, relief=tk.FLAT)
         self.load_status_label.pack(side=tk.LEFT, padx=(0, 8))
+        # Indeterminate spinner — visible only while starting/loading.
+        self.busy_pb = ttk.Progressbar(status_bar, orient=tk.HORIZONTAL,
+                                       mode="indeterminate", length=160)
 
         self.speed_var = tk.StringVar(value="⚡ --")
         self.speed_label = tk.Label(status_bar, textvariable=self.speed_var,
@@ -2375,14 +2815,17 @@ class LlamaRunner:
         speed_tip = Tooltip(self.speed_label, self.t("speed_tip"))
         self._reg(speed_tip, "speed_tip", "tooltip")
 
-        # Dedicated session-totals pill so token counts are always visible,
-        # independent of the speed readout.
-        self.tok_var = tk.StringVar(value="Σ --")
-        self.tok_label = tk.Label(status_bar, textvariable=self.tok_var,
-                                   bg=S("surface"), fg=S("accent"),
-                                   font=self.en_font(10, "bold"),
-                                   padx=10, pady=5, bd=0, relief=tk.FLAT)
-        self.tok_label.pack(side=tk.LEFT, padx=(0, 8))
+        # Live context counter (used / total / free) from /slots. This
+        # replaces the old Σ totals pill — the speed pill already carries
+        # the same gen/prompt session numbers, so the bar stays uncrowded.
+        self.ctx_pill_var = tk.StringVar(value=self.t("ctx_pill_idle"))
+        self.ctx_pill_lbl = tk.Label(status_bar, textvariable=self.ctx_pill_var,
+                                     bg=S("surface"), fg=S("fg_muted"),
+                                     font=self.en_font(10, "bold"),
+                                     padx=10, pady=5, bd=0, relief=tk.FLAT)
+        self.ctx_pill_lbl.pack(side=tk.LEFT, padx=(0, 8))
+        ctx_tip = Tooltip(self.ctx_pill_lbl, self.t("ctx_pill_tip"))
+        self._reg(ctx_tip, "ctx_pill_tip", "tooltip")
 
         self.open_browser_btn = ttk.Button(status_bar, text=self.t("open_browser_btn"),
                                             command=self.open_in_browser, state=tk.DISABLED)
@@ -2435,6 +2878,14 @@ class LlamaRunner:
         # Accent rule under the header separates chrome from content.
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 8))
 
+        # Teal→sky→violet gradient strip: richer color for a few cents of
+        # build/resize paint, zero cost while idle.
+        self._grad_canvas = tk.Canvas(parent, height=4, highlightthickness=0,
+                                      bg=S("bg"), bd=0)
+        self._grad_canvas.pack(fill=tk.X, pady=(0, 6))
+        self._grad_canvas.bind("<Configure>", self._draw_gradient)
+        self.root.after(60, self._draw_gradient)
+
         self.notebook = ttk.Notebook(parent)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
@@ -2459,15 +2910,18 @@ class LlamaRunner:
 
         self.gpu_procs_tab = ttk.Frame(self.notebook, padding=10)
         self.tasks_tab = ttk.Frame(self.notebook, padding=10)
+        self.inspector_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.server_tab, text=self.t("tab_server"))
         self.notebook.add(self.gpu_procs_tab, text=self.t("tab_gpu_procs"))
         self.notebook.add(self.tasks_tab, text=self.t("tab_tasks"))
+        self.notebook.add(self.inspector_tab, text=self.t("tab_inspector"))
         self._i18n_tabs = [(self.server_tab, "tab_server"), (self.gpu_procs_tab, "tab_gpu_procs"),
-                           (self.tasks_tab, "tab_tasks")]
+                           (self.tasks_tab, "tab_tasks"), (self.inspector_tab, "tab_inspector")]
 
         self._build_server_tab(self.server_inner)
         self._build_gpu_procs_tab(self.gpu_procs_tab)
         self._build_tasks_tab(self.tasks_tab)
+        self._build_inspector_tab(self.inspector_tab)
 
         # Wheel scrolling works over any part of the Server Setup tab.
         self._bind_mousewheel_recursive(self.server_inner)
@@ -2552,6 +3006,13 @@ class LlamaRunner:
                                           fg=warn, font=self.en_font(9), padx=10, pady=3, bd=0)
         self.task_server_state.pack(side=tk.RIGHT)
         self._reg(self.task_server_state, "task_not_running", "label")
+        # Same live context counter as the Server Setup status bar.
+        self.task_ctx_lbl = tk.Label(header, textvariable=self.ctx_pill_var,
+                                     bg=surf, fg=S("fg_muted"),
+                                     font=self.en_font(9, "bold"), padx=10, pady=3, bd=0)
+        self.task_ctx_lbl.pack(side=tk.RIGHT, padx=(0, 8))
+        task_ctx_tip = Tooltip(self.task_ctx_lbl, self.t("ctx_pill_tip"))
+        self._reg(task_ctx_tip, "ctx_pill_tip", "tooltip")
 
         presets = ttk.Frame(parent)
         presets.pack(fill=tk.X, pady=(0, 8))
@@ -2593,7 +3054,36 @@ class LlamaRunner:
                             activebackground=surf, padx=18, pady=6,
                             font=self.en_font(10, "bold"))
         run_btn.pack(side=tk.RIGHT)
+        self.task_run_btn = run_btn
         self._reg(run_btn, "task_run", "button")
+        # Hover glow: chip brightens to a solid green "go" face.
+        run_btn.bind("<Enter>",
+                     lambda e: run_btn.config(bg=S("ok"), fg=S("bg")))
+        run_btn.bind("<Leave>",
+                     lambda e: run_btn.config(bg=S("surface_hi"), fg=ok))
+
+        # Kill Task: cancels only the in-flight generation; server keeps
+        # running. Always clickable — with no task running it reports that
+        # instead of staying gray/dead.
+        self.kill_task_btn = tk.Button(opts, text=self.t("task_kill"),
+                                       command=self.kill_task, bd=0,
+                                       cursor="hand2", bg=surf_hi, fg=danger,
+                                       activebackground=surf,
+                                       activeforeground=danger,
+                                       padx=14, pady=6,
+                                       font=self.en_font(10, "bold"))
+        self.kill_task_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        self._reg(self.kill_task_btn, "task_kill", "button")
+        kill_tip = Tooltip(self.kill_task_btn, self.t("task_kill_tip"))
+        self._reg(kill_tip, "task_kill_tip", "tooltip")
+        # Hover glow: fills solid red (text flips to dark for contrast).
+        self.kill_task_btn.bind(
+            "<Enter>",
+            lambda e: self.kill_task_btn.config(bg=S("danger"), fg=S("bg")))
+        self.kill_task_btn.bind(
+            "<Leave>",
+            lambda e: self.kill_task_btn.config(bg=S("surface_hi"),
+                                                 fg=S("danger")))
 
         result = tk.Frame(parent, bg=surf, highlightthickness=1, highlightbackground=S("border"))
         result.pack(fill=tk.X, pady=(0, 8))
@@ -2622,20 +3112,299 @@ class LlamaRunner:
         self._update_task_server_state()
         self.task_prompt.bind("<FocusIn>", lambda e: self._update_task_server_state())
 
+    # ------------------------------------------------------------------
+    # Tab: Task Inspector — system prompt / prompt / thinking / output
+    # plus a decode-speed chart across the whole generation.
+    # ------------------------------------------------------------------
+    def _build_inspector_tab(self, parent):
+        bg, surf, surf_hi = S("bg"), S("surface"), S("surface_hi")
+        fg, muted = S("fg"), S("fg_muted")
+        ok, warn, danger, info = S("ok"), S("warn"), S("danger"), S("info")
+
+        header = ttk.Frame(parent)
+        header.pack(fill=tk.X, pady=(0, 8))
+        title = ttk.Label(header, text=self.t("tab_inspector"),
+                          font=self.font_for(self.t("tab_inspector"), 16, "bold"),
+                          foreground=S("accent"))
+        title.pack(side=tk.LEFT)
+        self._reg(title, "tab_inspector", "label")
+        self.insp_server_state = tk.Label(header, text=self.t("task_not_running"),
+                                          bg=surf, fg=warn, font=self.en_font(9),
+                                          padx=10, pady=3, bd=0)
+        self.insp_server_state.pack(side=tk.RIGHT)
+        self._reg(self.insp_server_state, "task_not_running", "label")
+
+        # --- Chart: the tab IS the chart — tok/s across the whole
+        # generation, sized to fill every remaining pixel ---
+        chart_card = tk.Frame(parent, bg=surf, highlightthickness=1,
+                              highlightbackground=S("border"))
+        chart_card.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
+        chart_head = tk.Frame(chart_card, bg=surf)
+        chart_head.pack(fill=tk.X, padx=12, pady=(10, 0))
+        tk.Label(chart_head, text=self.t("insp_graph_title"), bg=surf,
+                 fg=info, font=self.en_font(11, "bold")).pack(side=tk.LEFT)
+        self.insp_stats_lbl = tk.Label(chart_head, text="", bg=surf, fg=muted,
+                                       font=self.en_font(9))
+        self.insp_stats_lbl.pack(side=tk.RIGHT)
+        self.insp_cv = tk.Canvas(chart_card, bg=S("log_bg"), height=430,
+                                 highlightthickness=0, bd=0)
+        self.insp_cv.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 4))
+        self.insp_cv.bind("<Configure>", lambda e: self.insp_draw_graph())
+        # Fires every time the tab becomes visible — the reliable
+        # redraw when returning from Task/Server tabs (Configure is
+        # not guaranteed on notebook remap).
+        self.insp_cv.bind("<Map>", lambda e: self.insp_draw_graph())
+        tk.Label(chart_card, text=self.t("insp_graph_hint"), bg=surf,
+                 fg=muted, font=self.en_font(8)).pack(anchor=tk.W,
+                                                      padx=12, pady=(2, 10))
+
+        self.insp_draw_graph()
+
+    def insp_draw_graph(self):
+        """Render the streamed tok/s series as a full-size area chart:
+        gradient fill, nice axis ticks, per-point dots, peak marker,
+        live latest-value badge and an average reference line."""
+        cv = getattr(self, "insp_cv", None)
+        if cv is None:
+            return
+        w, h = cv.winfo_width(), cv.winfo_height()
+        if w < 40 or h < 40:
+            # Canvas is on an unselected notebook tab (unmapped reports
+            # 1x1). Never delete() here: wiping-then-bailing used to
+            # erase the graph while the user ran a task from another
+            # tab. Samples keep accumulating; <Map> redraws on return.
+            return
+        cv.delete("all")
+        muted, info = S("fg_muted"), S("info")
+        bg_c = S("log_bg")
+
+        def _mix(c1, c2, t):
+            try:
+                a = tuple(int(c1[i:i + 2], 16) for i in (1, 3, 5))
+                b = tuple(int(c2[i:i + 2], 16) for i in (1, 3, 5))
+                return "#%02x%02x%02x" % tuple(
+                    int(a[k] + (b[k] - a[k]) * t) for k in range(3))
+            except Exception:
+                return c1
+
+        pad_l, pad_r, pad_t, pad_b = 52, 16, 14, 24
+        cw, ch = w - pad_l - pad_r, h - pad_t - pad_b
+        series = getattr(self, "insp_series", [])
+        if len(series) < 2:
+            cv.create_text(w / 2, h / 2 - 8, text=self.t("insp_no_data"),
+                           fill=muted, font=self.en_font(10))
+            cv.create_text(w / 2, h / 2 + 14, text=self.t("insp_graph_hint"),
+                           fill=S("border"), font=self.en_font(8))
+            return
+        ys = [v for _, v in series]
+        xs = [i for i, _ in series]
+        peak = max(ys)
+        # nice-rounded y max: smallest 1/2/2.5/5x10^n step that covers data
+        raw_max = peak * 1.15 if peak > 0 else 1.0
+        mag = 1.0
+        while mag * 10 <= raw_max:
+            mag *= 10
+        ymax = mag * 10
+        for mult in (1, 1.5, 2, 2.5, 3, 4, 5, 6, 8):
+            if mag * mult >= raw_max:
+                ymax = mag * mult
+                break
+        xmin, xmax = min(xs), max(xs)
+        if xmax <= xmin:
+            xmax = xmin + 1
+        avg = sum(ys) / len(ys)
+
+        def px(i):
+            return pad_l + (i - xmin) / (xmax - xmin) * cw
+
+        def py(v):
+            return pad_t + ch - (v / ymax) * ch
+
+        yfmt = "{:.0f}" if ymax >= 20 else "{:.1f}"
+        # gridlines + y labels at nice values (5 rows)
+        for k in range(5):
+            y = pad_t + ch * k / 4
+            cv.create_line(pad_l, y, w - pad_r, y, fill=S("border"),
+                           dash=(2, 4))
+            cv.create_text(pad_l - 8, y, text=yfmt.format(ymax * (1 - k / 4)),
+                           anchor=tk.E, fill=muted, font=self.en_font(8))
+        # x labels: 5 evenly spaced token indices
+        for k in range(5):
+            i = xmin + (xmax - xmin) * k / 4
+            cv.create_text(px(i), h - 8, text=str(int(i)), anchor=tk.N,
+                           fill=muted, font=self.en_font(8))
+        # area fill: base layer + stronger clipped bottom band (gradient)
+        area = [(pad_l, pad_t + ch)] + [(px(i), py(v)) for i, v in series] \
+            + [(px(xmax), pad_t + ch)]
+        flat = [c for p in area for c in p]
+        cv.create_polygon(flat, fill=_mix(info, bg_c, 0.55), outline="",
+                          stipple="gray25")
+        y_split = pad_t + ch * 0.6
+        inside = []
+        for k in range(len(area)):
+            x1, y1 = area[k]
+            x2, y2 = area[(k + 1) % len(area)]
+            i1, i2 = y1 >= y_split, y2 >= y_split
+            if i1:
+                inside.append((x1, y1))
+            if i1 != i2 and y2 != y1:
+                t = (y_split - y1) / (y2 - y1)
+                inside.append((x1 + (x2 - x1) * t, y_split))
+        if len(inside) >= 3:
+            cv.create_polygon([c for p in inside for c in p],
+                              fill=_mix(info, bg_c, 0.25), outline="")
+        # line (dark casing under bright stroke for contrast)
+        line = [c for p in [(px(i), py(v)) for i, v in series] for c in p]
+        cv.create_line(line, fill=_mix(info, bg_c, 0.4), width=5, smooth=True,
+                       capstyle=tk.ROUND)
+        cv.create_line(line, fill=info, width=3, smooth=True,
+                       capstyle=tk.ROUND)
+        # point dots (skip when dense)
+        if len(series) <= 80:
+            for i, v in series:
+                x, y = px(i), py(v)
+                cv.create_oval(x - 3, y - 3, x + 3, y + 3, fill=info,
+                               outline=bg_c, width=1)
+        # average reference line
+        cv.create_line(pad_l, py(avg), w - pad_r, py(avg),
+                       fill=S("violet"), dash=(5, 3), width=1.5)
+        cv.create_text(w - pad_r - 6, max(pad_t + 9, py(avg) - 9),
+                       text=f"avg {avg:.1f}", anchor=tk.E,
+                       fill=S("violet"), font=self.en_font(8, "bold"))
+        # peak marker + label
+        pi = max(range(len(series)), key=lambda k: series[k][1])
+        if 0 < pi < len(series) - 1:
+            xp, yp = px(series[pi][0]), py(series[pi][1])
+            cv.create_oval(xp - 5, yp - 5, xp + 5, yp + 5,
+                           outline=S("violet"), width=2)
+            ly = yp - 13 if yp - 13 >= pad_t + 8 else yp + 15
+            cv.create_text(xp, ly, text=f"peak {series[pi][1]:.0f}",
+                           anchor=tk.CENTER, fill=S("violet"),
+                           font=self.en_font(8, "bold"))
+        # latest-value badge
+        li, lv = series[-1]
+        xl, yl = px(li), py(lv)
+        anchor = tk.E if xl > w - pad_r - 46 else tk.W
+        ox = -8 if anchor == tk.E else 8
+        cv.create_text(xl + ox, yl, text=f"{lv:.0f} tok/s", anchor=anchor,
+                       fill=S("fg"), font=self.en_font(9, "bold"))
+        # axis frame
+        cv.create_rectangle(pad_l, pad_t, w - pad_r, pad_t + ch,
+                            outline=S("border"))
+        cv.create_text(12, pad_t + ch / 2, text="tok/s", angle=90,
+                       anchor=tk.CENTER, fill=muted, font=self.en_font(8))
+        # stats line
+        elapsed = 0.0
+        if self.insp_t0:
+            elapsed = time.time() - self.insp_t0
+        try:
+            self.insp_stats_lbl.config(
+                text=self.t("insp_stats").format(len(ys), avg, peak, elapsed))
+        except tk.TclError:
+            pass
+
+    def insp_reset_trace(self):
+        """Called at the start of every Run Task: fresh chart for THIS
+        run (the text panels were removed — the chart is the tab now)."""
+        self.insp_series = []
+        self.insp_t0 = time.time()
+        self._insp_last_flush = 0.0
+        self.insp_stats_lbl.config(text="")
+        self.insp_draw_graph()
+
+    def _insp_add_sample(self, sample):
+        """UI thread: one streamed tok/s point + chart redraw (used by
+        both Run Task and the speed test)."""
+        self.insp_series.append(sample)
+        self.insp_draw_graph()
+
+    def insp_flush_live(self, prompt_text=None, thinking_text=None,
+                        output_text=None, sample=None):
+        """UI-thread refresh while a task streams. Text panels are gone,
+        so this only records the sample and redraws; the text args are
+        kept for call-site compatibility."""
+        if sample is not None:
+            self.insp_series.append(sample)
+        self.insp_draw_graph()
+
     def _server_healthy(self):
-        return bool(self.process and self.process.poll() is None and self.model_ready)
+        """True when llama-server is up with the model loaded.
+
+        Works for a server this app spawned AND one started outside the
+        app (self.process is None): the HTTP /health probe is the source
+        of truth. Trusting only the child-process handle made externally
+        started servers look 'not running' forever, so Run Task sat in
+        its wait loop and the Inspector never saw a single token."""
+        if self.process and self.process.poll() is None and self.model_ready:
+            return True
+        return self._probe_health()
+
+    def _probe_health(self, timeout=0.8):
+        """One cached HTTP GET /health against the configured port."""
+        now = time.time()
+        if now - getattr(self, "_health_probe_at", 0.0) < 1.0:
+            return getattr(self, "_health_probe_ok", False)
+        ok = False
+        try:
+            port = int(self.port_var.get())
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/health", timeout=timeout) as resp:
+                ok = resp.status == 200
+        except Exception:
+            ok = False
+        if ok:
+            self.model_ready = True
+        self._health_probe_at = now
+        self._health_probe_ok = ok
+        return ok
 
     def _update_task_server_state(self):
-        if self._server_healthy():
-            self.task_server_state.config(
-                text=self.t("task_running").format(self.port_var.get()), fg=S("ok"))
+        running = self._server_healthy()
+        if running:
+            text = self.t("task_running").format(self.port_var.get())
+            self.task_server_state.config(text=text, fg=S("ok"))
+            try:
+                self.insp_server_state.config(text=text, fg=S("ok"))
+            except (tk.TclError, AttributeError):
+                pass
         else:
-            self.task_server_state.config(text=self.t("task_not_running"), fg=S("warn"))
+            self.task_server_state.config(text=self.t("task_not_running"),
+                                          fg=S("warn"))
+            try:
+                self.insp_server_state.config(text=self.t("task_not_running"),
+                                              fg=S("warn"))
+            except (tk.TclError, AttributeError):
+                pass
 
     def _task_load_preset(self, key):
         text = self.t(key + "_text")
         self.task_prompt.delete("1.0", tk.END)
         self.task_prompt.insert("1.0", text)
+
+    @staticmethod
+    def _split_thinking(text):
+        """Pull a reasoning/thinking block out of generated text.
+        Returns (thinking, answer). Handles the common ASCII tag pairs
+        (Qwen <|think|>, DeepSeek <thought>, brain tags); if no marker,
+        thinking is '' and everything is the answer."""
+        if not text:
+            return "", ""
+        pairs = (("<|think|>", "<|/think|>"),
+                 ("<thought>", "</thought>"),
+                 ("<brain>", "</brain>"))
+        for open_t, close_t in pairs:
+            lo, lc = open_t.lower(), close_t.lower()
+            i = text.lower().find(lo)
+            if i < 0:
+                continue
+            body_start = i + len(open_t)
+            j = text.lower().find(lc, body_start)
+            if j < 0:
+                # Stream cut before the close tag: rest is thinking.
+                return text[body_start:].strip(), text[:i].strip()
+            return (text[body_start:j].strip(),
+                    (text[:i] + text[j + len(close_t):]).strip())
+        return "", text.strip()
 
     def run_task(self):
         if self._task_busy:
@@ -2647,12 +3416,38 @@ class LlamaRunner:
         if not self.model_var.get().strip():
             messagebox.showwarning(self.t("task_run"), self.t("task_no_model"))
             return
+        # System prompt is DISPLAY-ONLY in the Inspector (never injected).
+        # /completion takes a single prompt string; we send exactly what
+        # you typed so the trace matches the request byte-for-byte.
+
         self._task_busy = True
+        self._task_cancel_evt = threading.Event()
+        self._task_conn = None
+        self._ensure_pulse()
         self.task_tps.config(text="--", fg=S("info"))
         self.task_status.config(text=self.t("task_running_task"), fg=S("info"))
+        self.task_run_btn.config(state=tk.DISABLED)
         self._update_task_server_state()
+        self.insp_reset_trace()
+        # Show live state in the Inspector header while this run streams.
+        try:
+            self.insp_server_state.config(text=self.t("task_running_task"),
+                                          fg=S("info"))
+        except (tk.TclError, AttributeError):
+            pass
+        # Stash what the Inspector should show once this run settles.
+        self._insp_prompt_shown = prompt
+        self._insp_think_shown = ""
+        self._insp_out_shown = ""
+        # Log every step: if anything dies before the first token, the
+        # reason shows up in the log pane instead of vanishing silently.
+        self.log_write(
+            f"Run Task: sending prompt ({len(prompt)} chars, "
+            f"n_predict={self.task_npredict_var.get()}, "
+            f"temp={self.task_temp_var.get()})...", "info")
 
         def worker():
+            conn = None
             try:
                 port = self.port_var.get()
                 if not self._server_healthy():
@@ -2660,38 +3455,216 @@ class LlamaRunner:
                                                 self.start_server()))
                 deadline = time.time() + 240
                 while time.time() < deadline:
+                    if self._task_cancel_evt.is_set():
+                        self.root.after(0, self._task_on_cancelled)
+                        return
                     if self._server_healthy():
                         break
                     time.sleep(1)
                 else:
                     raise RuntimeError("Server did not become ready in time")
+                if self._task_cancel_evt.is_set():
+                    self.root.after(0, self._task_on_cancelled)
+                    return
+
+                n_predict = int(self.task_npredict_var.get())
+                temperature = float(self.task_temp_var.get())
                 body = json.dumps({
                     "prompt": prompt,
-                    "n_predict": int(self.task_npredict_var.get()),
-                    "temperature": float(self.task_temp_var.get()),
-                    "stream": False,
+                    "n_predict": n_predict,
+                    "temperature": temperature,
+                    "stream": True,
                     "cache_prompt": False,
                 }).encode("utf-8")
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/completion", data=body,
-                    headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=900) as resp:
-                    out = json.loads(resp.read().decode("utf-8", errors="replace"))
-                timings = out.get("timings", {}) or {}
+                # http.client (not urllib) so kill_task can reach the live
+                # socket and shutdown() it — verified to make llama-server
+                # cancel this generation and free the slot at once.
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
+                self._task_conn = conn
+                conn.request("POST", "/completion", body=body,
+                             headers={"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                if resp.status != 200:
+                    resp.read()
+                    raise RuntimeError(f"HTTP {resp.status}")
+
+                # --- Streamed read: accumulate answer + thinking and a
+                # decode-speed sample per chunk for the Inspector chart. ---
+                t_start = time.perf_counter()
+                t_first = None
+                out_parts, think_parts = [], []
+                token_idx = 0
+                timings = {}
+
+                def chunk_obj(raw):
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        return None
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                        if not line:
+                            return None
+                    if line == "[DONE]":
+                        return False
+                    try:
+                        o = json.loads(line)
+                    except json.JSONDecodeError:
+                        return None
+                    return o if isinstance(o, dict) else None
+
+                def flush(sample, force=False):
+                    now = time.time()
+                    if not force and now - self._insp_last_flush < 0.3:
+                        return
+                    self._insp_last_flush = now
+                    snap_out = "".join(out_parts)
+                    snap_think = "".join(think_parts)
+                    # Split live so the panels always match the final view.
+                    t_now, a_now = self._split_thinking(snap_out)
+                    think_now = (snap_think + ("\n" + t_now if t_now else "")).strip()
+                    self.root.after(0, lambda s=sample, a=a_now, th=think_now: self.insp_flush_live(
+                        self._insp_prompt_shown, th, a, sample=s))
+
+                while True:
+                    if self._task_cancel_evt.is_set():
+                        break
+                    raw = resp.readline()
+                    if not raw:
+                        break
+                    o = chunk_obj(raw)
+                    if o is False:
+                        break
+                    if o is None:
+                        continue
+                    if isinstance(o.get("timings"), dict):
+                        timings = o["timings"]
+                    # thinking may arrive as its own field...
+                    r = (o.get("reasoning_content") or o.get("reasoning")
+                         or "")
+                    if r:
+                        think_parts.append(r)
+                    piece = o.get("content", "")
+                    if not piece:
+                        ch = o.get("choices")
+                        if isinstance(ch, list) and ch:
+                            d = ch[0].get("delta") or {}
+                            piece = (d.get("content") or ch[0].get("text")
+                                     or "")
+                    if piece:
+                        if t_first is None:
+                            t_first = time.perf_counter()
+                        out_parts.append(piece)
+                        token_idx += 1
+                        # cumulative decode tok/s at this token index;
+                        # token 1 has a near-zero elapsed time (would plot
+                        # a million tok/s), and anything under 50ms is
+                        # still start-up jitter — skip those samples.
+                        el = time.perf_counter() - t_first
+                        if token_idx > 1 and el >= 0.05:
+                            flush((token_idx, token_idx / el))
+                        else:
+                            flush(None)
+                    else:
+                        flush(None)
+                    if o.get("stop"):
+                        break
+                try:
+                    resp.read()
+                except Exception:
+                    pass
+
+                if self._task_cancel_evt.is_set():
+                    self.root.after(0, self._task_on_cancelled)
+                    return
+
+                answer = "".join(out_parts)
+                tagged_think, answer = self._split_thinking(answer)
+                thinking = "".join(think_parts).strip()
+                if tagged_think:
+                    thinking = (thinking + "\n" + tagged_think).strip()
+                self._insp_think_shown = thinking
+                self._insp_out_shown = answer
+                done_in = time.perf_counter() - t_start
+                self.root.after(
+                    0, lambda n=token_idx, s=done_in: self.log_write(
+                        f"Run Task: finished — {n} tokens in {s:.1f}s"
+                        + (" (EMPTY — model emitted EOS immediately; "
+                           "rephrase the prompt)" if n <= 1 else ""),
+                        "success" if n > 1 else "warn"))
+                # final flush (always, regardless of throttle)
+                self.root.after(0, lambda: self.insp_flush_live(
+                    self._insp_prompt_shown, thinking, answer))
                 self.root.after(0, lambda: self._task_finish(
-                    out.get("content", ""),
+                    answer,
                     timings.get("predicted_per_second"),
                     timings.get("prompt_per_second"),
-                    timings.get("predicted_n", 0),
+                    timings.get("predicted_n", token_idx),
                     timings.get("prompt_n", 0),
                     timings.get("total_ms", 0)))
             except Exception as e:
-                self.root.after(0, lambda e=e: self._task_fail(str(e)))
+                if self._task_cancel_evt is not None and self._task_cancel_evt.is_set():
+                    self.root.after(0, self._task_on_cancelled)
+                else:
+                    self.root.after(0, lambda e=e: self._task_fail(str(e)))
+            finally:
+                self._task_conn = None
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def kill_task(self):
+        """Cancel only the in-flight Run Task generation. Drops this
+        request's HTTP socket — llama-server treats the disconnect as a
+        cancel, frees the slot, and the server process keeps running
+        (verified live: slot idle within ~1s of shutdown)."""
+        if not self._task_busy:
+            try:
+                self.task_status.config(text=self.t("task_no_idle"), fg=S("warn"))
+            except Exception:
+                pass
+            self.log_write("No task running — nothing to cancel (server untouched).", "info")
+            return
+        if self._task_cancel_evt is None:
+            self._task_cancel_evt = threading.Event()
+        self._task_cancel_evt.set()
+        conn = self._task_conn
+        if conn is not None:
+            try:
+                sock = conn.sock
+                if sock is not None:
+                    sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+        self.log_write("Cancelling current task (server keeps running)...", "warn")
+        # If the worker is still in its server-ready wait (no socket yet),
+        # its event check will notice — this watchdog just guarantees the
+        # UI resets even if that worker died without reporting.
+        self.root.after(2500, self._task_cancel_watchdog)
+
+    def _task_cancel_watchdog(self):
+        if (self._task_busy and self._task_cancel_evt is not None
+                and self._task_cancel_evt.is_set()):
+            self._task_on_cancelled()
+
+    def _task_on_cancelled(self):
+        """Idempotent: worker and watchdog may both call this."""
+        if not self._task_busy:
+            return
+        self._task_busy = False
+        self._task_conn = None
+        self.task_tps.config(text="⏹", fg=S("warn"))
+        self.task_status.config(text=self.t("task_cancelled"), fg=S("warn"))
+        self.task_run_btn.config(state=tk.NORMAL)
+        self._update_task_server_state()
+        self.log_write("Task cancelled — server still running.", "warn")
+
     def _task_finish(self, content, tps, pts, pred_n, prompt_n, total_ms):
         self._task_busy = False
+        self.task_run_btn.config(state=tk.NORMAL)
         if tps:
             self.task_tps.config(text=f"{tps:.1f} tok/s", fg=S("ok"))
         else:
@@ -2711,9 +3684,215 @@ class LlamaRunner:
 
     def _task_fail(self, error):
         self._task_busy = False
+        self.task_run_btn.config(state=tk.NORMAL)
         self.task_tps.config(text="ERR", fg=S("danger"))
         self.task_status.config(text=error, fg=S("danger"))
         self._update_task_server_state()
+        self.log_write(f"Run Task FAILED: {error}", "error")
+
+    # ------------------------------------------------------------------
+    # Mini speed test (compact dih.py) — benchmarks the model that is
+    # currently LOADED in llama-server via a streamed /completion, and
+    # reports TTFT + decode tok/s + prompt tok/s on one small label in
+    # the Advanced Performance panel.
+    # ------------------------------------------------------------------
+    def run_speed_test(self):
+        if self._bench_busy:
+            return
+        if self._task_busy:
+            self.bench_result_lbl.config(text=self.t("bench_task_busy"),
+                                         foreground=S("warn"))
+            return
+        if not self._server_healthy():
+            self.bench_result_lbl.config(text=self.t("bench_not_ready"),
+                                         foreground=S("warn"))
+            return
+        self._bench_busy = True
+        self.bench_btn.config(state=tk.DISABLED)
+        self.bench_result_lbl.config(text=self.t("bench_running"),
+                                     foreground=S("info"))
+        # A speed test IS a streamed generation, so it earns the chart:
+        # give it a fresh tok/s series (text panels keep the last task).
+        self.insp_series = []
+        self.insp_t0 = time.time()
+        self._insp_last_flush = 0.0
+        self.insp_stats_lbl.config(text="")
+        self.insp_draw_graph()
+        self._update_task_server_state()
+
+        def worker():
+            conn = None
+            try:
+                port = self.port_var.get()
+                prompt = ("Explain how a GPU accelerates large language models. "
+                          "Give a concise technical answer in about 150 words.")
+                start = time.perf_counter()
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
+                self._bench_conn = conn
+
+                def chunk_obj(raw_line):
+                    """Accept plain JSON lines AND SSE `data:`-prefixed
+                    lines (this server's stream shape was neither purely
+                    one nor the other — unparseable lines used to drop
+                    every token and end with 'no text')."""
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        return None
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                        if not line:
+                            return None
+                    if line == "[DONE]":
+                        return False
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        return None
+                    return obj if isinstance(obj, dict) else None
+
+                # --- Pass 1: streamed (gives a real TTFT) ---
+                body = json.dumps({
+                    "prompt": prompt, "n_predict": 256,
+                    "temperature": 0.7, "stream": True,
+                    "cache_prompt": False,
+                }).encode("utf-8")
+                conn.request("POST", "/completion", body=body,
+                             headers={"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                first_token = None
+                pieces = []
+                timings = {}
+                if resp.status == 200:
+                    b_idx = 0
+                    b_last = 0.0
+                    while True:
+                        raw = resp.readline()
+                        if not raw:
+                            break
+                        obj = chunk_obj(raw)
+                        if obj is False:
+                            break
+                        if obj is None:
+                            continue
+                        if isinstance(obj.get("timings"), dict):
+                            timings = obj["timings"]
+                        piece = obj.get("content", "")
+                        if not piece:
+                            ch = obj.get("choices")
+                            if isinstance(ch, list) and ch:
+                                delta = ch[0].get("delta") or {}
+                                piece = (delta.get("content")
+                                         or ch[0].get("text") or "")
+                        if piece:
+                            if first_token is None:
+                                first_token = time.perf_counter()
+                            pieces.append(piece)
+                            # Feed the Task Inspector's tok/s chart the
+                            # same way Run Task does (cumulative decode
+                            # speed, throttled, no bogus token-1 sample).
+                            b_idx += 1
+                            bel = time.perf_counter() - first_token
+                            now = time.time()
+                            if (b_idx > 1 and bel >= 0.05
+                                    and now - b_last >= 0.3):
+                                b_last = now
+                                s = (b_idx, b_idx / bel)
+                                self.root.after(
+                                    0, lambda s=s: self._insp_add_sample(s))
+                        if obj.get("stop"):
+                            break
+                    try:
+                        resp.read()  # drain so the keep-alive conn reuses
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        resp.read()
+                    except Exception:
+                        pass
+
+                text = "".join(pieces)
+
+                # --- Pass 2: non-stream fallback — the exact request Run
+                # Task uses (proven on this server) when the stream yields
+                # neither content nor timings. ---
+                if not text and not timings:
+                    body = json.dumps({
+                        "prompt": prompt, "n_predict": 256,
+                        "temperature": 0.7, "stream": False,
+                        "cache_prompt": False,
+                    }).encode("utf-8")
+                    conn.request("POST", "/completion", body=body,
+                                 headers={"Content-Type": "application/json"})
+                    resp2 = conn.getresponse()
+                    if resp2.status != 200:
+                        resp2.read()
+                        raise RuntimeError(f"HTTP {resp2.status}")
+                    out = json.loads(
+                        resp2.read().decode("utf-8", errors="replace"))
+                    text = out.get("content") or ""
+                    if isinstance(out.get("timings"), dict):
+                        timings = out["timings"]
+                    if not text and not timings:
+                        raise RuntimeError("model returned no text")
+
+                end = time.perf_counter()
+
+                # --- Metrics ---
+                if first_token:
+                    ttft = first_token - start
+                else:
+                    # non-stream: first token is ready after prompt eval
+                    ttft = float(timings.get("prompt_ms") or 0) / 1000.0
+                    if ttft <= 0:
+                        ttft = end - start
+                if timings.get("predicted_per_second"):
+                    speed = float(timings["predicted_per_second"])
+                elif timings.get("predicted_n"):
+                    gen_s = (timings.get("predicted_ms") or 0) / 1000.0
+                    speed = (int(timings["predicted_n"]) / gen_s
+                             if gen_s > 0 else 0.0)
+                else:
+                    gen_s = max(end - (first_token or start), 1e-6)
+                    speed = max(1, round(len(text) / 4)) / gen_s
+                if timings.get("predicted_n"):
+                    n = int(timings["predicted_n"])
+                else:
+                    n = max(1, round(len(text) / 4))
+                parts_disp = [f"TTFT {ttft:.2f}s", f"{speed:.1f} tok/s"]
+                pp = timings.get("prompt_per_second")
+                if pp:
+                    parts_disp.append(f"prompt {float(pp):.0f}/s")
+                parts_disp.append(f"{n} tok")
+                parts_disp.append(f"{(end - start):.1f}s")
+                msg = " • ".join(parts_disp)
+                self.root.after(0, lambda m=msg: self._bench_done(m, None))
+            except Exception as e:
+                err = str(e) or e.__class__.__name__
+                self.root.after(0, lambda err=err: self._bench_done(None, err))
+            finally:
+                self._bench_conn = None
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _bench_done(self, msg, err):
+        self._bench_busy = False
+        self._bench_conn = None
+        try:
+            self.bench_btn.config(state=tk.NORMAL)
+        except tk.TclError:
+            return
+        if err:
+            self.bench_result_lbl.config(text=err, foreground=S("danger"))
+            self.log_write(f"Speed test failed: {err}", "warn")
+        else:
+            self.bench_result_lbl.config(text=msg, foreground=S("ok"))
+            self.log_write(f"Speed test (current model): {msg}", "info")
 
     # ------------------------------------------------------------------
     # Tab: GPU Processes — per-process VRAM/GPU usage with kill controls
@@ -3125,6 +4304,8 @@ class LlamaRunner:
         tab_visible = str(self.gpu_procs_tab) == str(self.notebook.select())
         if self._gpu_refresh_enabled and tab_visible:
             self._gpu_collect()
+        if self._gpu_refresh_enabled:
+            self._ensure_pulse()
         self.root.after(1000, self._gpu_mon_loop)
 
     # ------------------------------------------------------------------
@@ -3261,7 +4442,9 @@ class LlamaRunner:
         if cur and os.path.abspath(cur) == os.path.abspath(found):
             return found
         self.mmproj_path_var.set(found)
-        self.mmproj_url_var.set("")
+        # A freshly matched projector means this model wants vision —
+        # switch the row ON (the path is new, so nothing is clobbered).
+        self.mmproj_enabled_var.set(True)
         self.log_write(self.t("vision_mmproj_auto").format(name=os.path.basename(found)), "success")
         return found
 
@@ -3436,10 +4619,46 @@ class LlamaRunner:
         for w in (self.ctk_combo, self.ctv_combo):
             w.config(state=state)
 
-    def apply_preset(self):
-        name = self.preset_var.get()
+    def _on_speed_preset(self, _event=None):
+        """⚡ Speed list: applies instantly. Full presets (MiMo Ultra)
+        become the preset in use; small partial presets only ADD their
+        delta on top of the preset in use, so the main combo keeps
+        pointing at the base preset."""
+        name = self.speed_preset_var.get()
         p = PRESETS.get(name)
         if not p:
+            return
+        if not p.get("partial"):
+            self.preset_var.set(name)
+        self.apply_preset(name)
+
+    def apply_preset(self, name=None):
+        if name is None:
+            name = self.preset_var.get()
+        p = PRESETS.get(name)
+        if not p:
+            return
+        # Small ⚡ presets ("partial"): add only their delta on top of the
+        # preset currently in use — never reset ctx/batches/extras.
+        if p.get("partial"):
+            overlay_vars = {
+                "ngl": self.ngl_var, "ctx": self.ctx_var,
+                "slots": self.slots_var, "threads": self.threads_var,
+                "tbatch": self.tbatch_var, "batch": self.batch_var,
+                "ubatch": self.ubatch_var, "flash": self.flash_var,
+                "defrag": self.defrag_var, "port": self.port_var,
+                "extra": self.extra_var, "graph_opt": self.graph_opt_var,
+            }
+            applied = []
+            for key in p.get("only", []):
+                if key in p and key in overlay_vars:
+                    overlay_vars[key].set(p[key])
+                    applied.append(key)
+            if self.graph_opt_var.get():
+                self.log_write("GGML_CUDA_GRAPH_OPT=1 → applied on next server start.", "info")
+            self.log_write(f"Added on top of current preset: {name} ({', '.join(applied)})",
+                           "success")
+            self.update_preview()
             return
         self.ngl_var.set(p["ngl"])
         self.ctx_var.set(p["ctx"])
@@ -3487,8 +4706,17 @@ class LlamaRunner:
             if not self.spec_draft_auto_var.get() and "spec_draft_nmax" in p:
                 self.spec_draft_nmax_var.set(max(1, min(16, int(p["spec_draft_nmax"]))))
             if p.get("spec_draft_cache"):
-                self.spec_draft_cache_var.set(p["spec_draft_cache"])
+                self.spec_draft_cache_var.set(p.get("spec_draft_cache"))
             self.on_spec_mode_changed()
+        if "port" in p:
+            self.port_var.set(p["port"])
+        if "extra" in p:
+            self.extra_var.set(p["extra"])
+        # Env flag: presets without the key reset it to off, so a speed
+        # preset never leaks into the next one.
+        self.graph_opt_var.set(bool(p.get("graph_opt", False)))
+        if self.graph_opt_var.get():
+            self.log_write("GGML_CUDA_GRAPH_OPT=1 → applied on next server start.", "info")
         self.log_write(f"Applied preset: {name}", "success")
 
     def analyze_and_recommend(self):
@@ -3537,6 +4765,19 @@ class LlamaRunner:
         if path:
             self.mmproj_path_var.set(path)
 
+    def browse_mtp(self):
+        """Pick the MTP draft GGUF. Defaults to the main model's folder —
+        these files normally ship next to the model they accelerate."""
+        model_dir = os.path.dirname(self.model_var.get().strip())
+        path = filedialog.askopenfilename(
+            title="Select MTP draft model",
+            filetypes=[("GGUF files", "*.gguf"), ("All files", "*.*")],
+            initialdir=model_dir if os.path.isdir(model_dir) else r"D:\model"
+        )
+        if path:
+            self.mtp_model_var.set(path)
+            self.mtp_enabled_var.set(True)  # picking a file means you want it
+
     def browse_server(self):
         path = filedialog.askopenfilename(
             title="Select llama-server.exe",
@@ -3545,6 +4786,58 @@ class LlamaRunner:
         )
         if path:
             self.server_var.set(path)
+
+    def set_server_preset(self, folder):
+        """Jump the Server exe field to <folder>\\llama-server.exe."""
+        self.server_var.set(os.path.join(folder, "llama-server.exe"))
+        self.log_write(f"Server exe preset: {self.server_var.get()}", "info")
+
+    def _scan_server_presets(self):
+        """Rebuild the Server-preset dropdown from C:\\llmcap.
+
+        Walks the tree for every llama-server.exe; the root one is shown
+        as 'default', every other one gets its folder name. Runs on each
+        dropdown open (Combobox postcommand), so new folders added to
+        C:\\llmcap show up automatically."""
+        root = r"C:\llmcap"
+        found = []
+        try:
+            if os.path.isfile(os.path.join(root, "llama-server.exe")):
+                found.append((self.t("srv_preset_def"),
+                              os.path.join(root, "llama-server.exe")))
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames
+                               if not d.startswith((".", "$"))]
+                if os.path.normpath(dirpath) == os.path.normpath(root):
+                    continue
+                if "llama-server.exe" in filenames:
+                    found.append((os.path.basename(dirpath),
+                                  os.path.join(dirpath, "llama-server.exe")))
+        except OSError:
+            pass
+        found.sort(key=lambda e: e[0].lower())
+        # Keep 'default' pinned first if present.
+        found.sort(key=lambda e: e[1].lower() != os.path.join(
+            root, "llama-server.exe").lower())
+        self._srv_preset_paths = {label: path for label, path in found}
+        labels = [label for label, _ in found]
+        self.srv_preset_combo.configure(values=labels)
+        # Highlight the entry matching the current exe path.
+        cur = os.path.normcase(os.path.normpath(
+            (self.server_var.get() or "").strip()))
+        sel = next((i for i, (_, p) in enumerate(found)
+                    if os.path.normcase(os.path.normpath(p)) == cur), None)
+        if sel is not None:
+            self.srv_preset_combo.current(sel)
+        else:
+            self.srv_preset_combo.set("")
+
+    def _on_server_preset(self, _event=None):
+        label = self.srv_preset_combo.get()
+        path = self._srv_preset_paths.get(label)
+        if path:
+            self.server_var.set(path)
+            self.log_write(f"Server exe preset: {path}", "info")
 
     # ------------------------------------------------------------------
     # Log helpers
@@ -3586,6 +4879,7 @@ class LlamaRunner:
         cmd += ["-b", str(self.batch_var.get())]
         cmd += ["-ub", str(self.ubatch_var.get())]
         cmd += ["--defrag-thold", str(self.defrag_var.get())]
+        cmd += ["--temp", str(self.temp_server_var.get())]
         cmd += ["--port", str(self.port_var.get())]
         if self.flash_var.get():
             cmd += ["-fa", "on"]
@@ -3661,13 +4955,18 @@ class LlamaRunner:
                 if mode in ("DSpark", "DFlash"):
                     cmd += ["--spec-draft-type-k", self.spec_draft_cache_var.get()]
         mmproj_path = self.mmproj_path_var.get().strip()
-        mmproj_url = self.mmproj_url_var.get().strip()
-        if mmproj_path:
-            if mmproj_url:
-                self.log_write("Warning: both mmproj file and URL set — using the local file only.", "warn")
+        if mmproj_path and self.mmproj_enabled_var.get():
             cmd += ["--mmproj", mmproj_path]
-        elif mmproj_url:
-            cmd += ["--mmproj-url", mmproj_url]
+        # --- MTP draft model file: --spec-draft-model + draft-mtp spec.
+        # The file only pays off with MTP speculation active, so an ON
+        # toggle forces --spec-type draft-mtp (replacing none/ngram/...).
+        mtp_path = self.mtp_model_var.get().strip()
+        if mtp_path and self.mtp_enabled_var.get():
+            cmd += ["--spec-draft-model", mtp_path]
+            if "--spec-type" in cmd:
+                cmd[cmd.index("--spec-type") + 1] = "draft-mtp"
+            else:
+                cmd += ["--spec-type", "draft-mtp"]
         extra = self.extra_var.get().strip()
         if extra:
             cmd += extra.split()
@@ -3736,6 +5035,8 @@ class LlamaRunner:
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.status_var.set("Starting...")
+        self._set_busy_ui(True)
+        self._ensure_pulse()
 
         self.load_start_time = time.time()
         self.model_ready = False
@@ -3744,20 +5045,44 @@ class LlamaRunner:
         self.speed_samples.clear()
         self.token_stats = {"gen": 0, "prompt": 0, "prompt_tps": None}
         self.speed_var.set("⚡ --")
-        self.tok_var.set("Σ --")
+        self._run_ctx_total = int(self.ctx_var.get())
+        self._last_ctx = None
+        self._ctx_slots_fresh = False
+        self._ctx_log_est = 0
+        self._pending_prompt_n = 0
+        self.ctx_pill_var.set(self.t("ctx_pill_idle"))
+        self._ctx_pill_color(S("fg_muted"))
         self.speed_label.config(bg=S("surface"), fg=S("info"))
         self.open_browser_btn.config(state=tk.DISABLED)
 
-        thread = threading.Thread(target=self.run_process, args=(cmd,), daemon=True)
+        env = self._server_env()
+        if env is not None:
+            self.log_write("Env: GGML_CUDA_GRAPH_OPT=1 (concurrent Q/K/V CUDA streams)", "info")
+        thread = threading.Thread(target=self.run_process, args=(cmd, env), daemon=True)
         thread.start()
         self.root.after(1000, self._tick_uptime)
 
-    def run_process(self, cmd):
+    def _server_env(self):
+        """Environment for the llama-server child process.
+
+        None = inherit the app's environment untouched. Otherwise a copy
+        with GGML_CUDA_GRAPH_OPT=1 (concurrent Q/K/V CUDA streams) — the
+        flag must reach only llama-server, never the whole app.
+        """
+        if not self.graph_opt_var.get():
+            return None
+        env = os.environ.copy()
+        env["GGML_CUDA_GRAPH_OPT"] = "1"
+        return env
+
+    def run_process(self, cmd, env=None):
         try:
             popen_kwargs = dict(
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 bufsize=1, universal_newlines=True
             )
+            if env is not None:
+                popen_kwargs["env"] = env
             if sys.platform == "win32":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -3782,6 +5107,14 @@ class LlamaRunner:
                 target=self._poll_health, args=(self.port_var.get(),), daemon=True
             )
             health_thread.start()
+
+            # Live context counter: exact KV occupancy from /slots (n_past
+            # per slot), tracked for the lifetime of THIS process object so
+            # a quick restart can't leave a stale thread polling.
+            ctx_thread = threading.Thread(
+                target=self._poll_context, args=(self.port_var.get(),), daemon=True
+            )
+            ctx_thread.start()
 
             for line in self.process.stdout:
                 line = line.rstrip()
@@ -3857,10 +5190,102 @@ class LlamaRunner:
             time.sleep(1)
 
     def _mark_model_loaded(self, elapsed_seconds):
+        self._set_busy_ui(False)
+        self._ensure_pulse()
         self.load_status_var.set(f"{self.t('model_loaded_prefix')} {elapsed_seconds:.1f}{self.t('model_loaded_suffix')}")
         self.load_status_label.config(bg=S("ok"), fg=S("bg"))
         self.log_write(f"Model finished loading in {elapsed_seconds:.1f}s.", "success")
         self.open_browser_btn.config(state=tk.NORMAL)
+        # Header labels (Run Task + Inspector) must flip to RUNNING now.
+        self._update_task_server_state()
+
+    def _poll_context(self, port):
+        """Accurate context counter from GET /slots.
+
+        Verified against the live llama-server: per-slot occupancy is
+        reported as n_prompt_tokens (grows during decode as prompt+decoded
+        and keeps the final value after the task; older builds use n_past
+        instead — both accepted). Slots that have never run omit the
+        fields entirely, so a reading only counts when at least one slot
+        actually reported a number — never paint a fake 0.
+        Bounded to the process that spawned this thread; 1s cadence."""
+        proc = self.process
+        url = f"http://127.0.0.1:{port}/slots"
+        fails = 0
+        na_shown = False
+        while proc is not None and proc.poll() is None:
+            try:
+                with urllib.request.urlopen(url, timeout=1.5) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                slots = data if isinstance(data, list) else (data.get("slots") or [])
+                used = 0
+                got = False
+                for s in slots:
+                    if not isinstance(s, dict):
+                        continue
+                    try:
+                        v = s.get("n_prompt_tokens")
+                        if v is None:
+                            v = s.get("n_past")
+                        if v is None:
+                            continue
+                        v = int(v)
+                        # Builds that keep n_prompt_tokens at prompt length
+                        # while decoding expose growth only in n_decoded;
+                        # add it just then (this build already includes
+                        # decoded, where dec <= v never triggers).
+                        dec = 0
+                        if s.get("is_processing"):
+                            nt = s.get("next_token") or []
+                            if isinstance(nt, list) and nt and isinstance(nt[0], dict):
+                                dec = int(nt[0].get("n_decoded") or 0)
+                        if dec > v:
+                            v += dec
+                        used += v
+                        got = True
+                    except (TypeError, ValueError):
+                        continue
+                fails = 0
+                if got:
+                    total = self._run_ctx_total or 0
+                    self.root.after(
+                        0, lambda u=used, t=total: self._render_ctx(u, t, True))
+            except Exception:
+                fails += 1
+                # Only surface n/a once the model is actually up — during
+                # load the endpoint simply isn't answering yet.
+                if fails == 3 and not na_shown and self.model_ready:
+                    na_shown = True
+                    self.root.after(
+                        0, lambda: self.ctx_pill_var.set(self.t("ctx_pill_na")))
+            time.sleep(1.0)
+
+    def _ctx_pill_color(self, color):
+        for w in (getattr(self, "ctx_pill_lbl", None),
+                  getattr(self, "task_ctx_lbl", None)):
+            if w is not None:
+                try:
+                    w.config(fg=color)
+                except tk.TclError:
+                    pass
+
+    def _render_ctx(self, used, total, fresh=False):
+        """Paint the context pill: used / total · free, green while >30%
+        of the window remains, amber under 30%, red under 10%. fresh=True
+        marks a real /slots reading (vs the stdout fallback estimate)."""
+        if not total or total <= 0:
+            return
+        if fresh:
+            self._ctx_slots_fresh = True
+        self._last_ctx = (used, total)
+        left = max(0, total - used)
+        free_w = self.t("ctx_pill_free")
+        pre = "Ctx" if self.lang == "en" else "کانتکست"
+        self.ctx_pill_var.set(f"{pre} {used:,} / {total:,} · {left:,} {free_w}")
+        frac = left / total
+        color = (S("danger") if frac < 0.10
+                 else S("warn") if frac < 0.30 else S("ok"))
+        self._ctx_pill_color(color)
 
     def _fmt_tok(self, n):
         """1234 -> '1.2K', 356 -> '356'."""
@@ -3869,8 +5294,18 @@ class LlamaRunner:
     def _account_tokens(self, n, is_prompt):
         if is_prompt:
             self.token_stats["prompt"] += n
+            self._pending_prompt_n = n
         else:
             self.token_stats["gen"] += n
+            # Fallback context estimate for builds whose /slots never
+            # reports occupancy: llama-server re-sends the full
+            # conversation as the prompt each request, so last prompt +
+            # last generation ≈ tokens now sitting in the KV cache.
+            est = (self._pending_prompt_n or 0) + n
+            if est > 0:
+                self._ctx_log_est = est
+                if not self._ctx_slots_fresh and self._run_ctx_total:
+                    self._render_ctx(est, self._run_ctx_total)
         self._render_speed()
 
     def _update_prompt_speed(self, tps):
@@ -3896,13 +5331,10 @@ class LlamaRunner:
         if not (self.speed_samples or st["gen"] or st["prompt"] or st.get("prompt_tps")):
             # Nothing measured yet this session.
             self.speed_var.set("⚡ --")
-            self.tok_var.set("Σ --")
             return
         seg.append(f"{self._fmt_tok(st['gen'])} {self.t('speed_gen')}")
         seg.append(f"{self._fmt_tok(st['prompt'])} {self.t('speed_prm')}")
         self.speed_var.set("⚡ " + "  ·  ".join(seg))
-        self.tok_var.set(f"Σ {self._fmt_tok(st['gen'])} {self.t('speed_gen')} · "
-                          f"{self._fmt_tok(st['prompt'])} {self.t('speed_prm')}")
         self.speed_label.config(bg=S("info"), fg=S("bg"))
 
     def open_in_browser(self):
@@ -3922,6 +5354,7 @@ class LlamaRunner:
 
     def on_process_end(self):
         self.process = None
+        self._set_busy_ui(False)
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.status_var.set("Stopped")
@@ -3930,6 +5363,18 @@ class LlamaRunner:
         self.load_status_label.config(bg=S("surface"), fg=S("fg"))
         self.open_browser_btn.config(state=tk.DISABLED)
         self.uptime_var.set("")
+        self._run_ctx_total = 0
+        self._last_ctx = None
+        self._ctx_slots_fresh = False
+        self._ctx_log_est = 0
+        self._pending_prompt_n = 0
+        self.ctx_pill_var.set(self.t("ctx_pill_idle"))
+        self._ctx_pill_color(S("fg_muted"))
+        # Server died — both server-state headers go back to not running.
+        try:
+            self._update_task_server_state()
+        except (tk.TclError, AttributeError):
+            pass
 
     def _kill_process_tree(self):
         """Forcefully kill the server and any child processes it spawned.
